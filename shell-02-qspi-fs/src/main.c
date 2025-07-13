@@ -16,8 +16,8 @@
 
 // GPIO definitions
 static const struct gpio_dt_spec green_led = GPIO_DT_SPEC_GET(DT_ALIAS(led_green), gpios);
-static const struct gpio_dt_spec red_led   = GPIO_DT_SPEC_GET(DT_ALIAS(led_red), gpios);
-static const struct gpio_dt_spec blue_led  = GPIO_DT_SPEC_GET(DT_ALIAS(led_blue), gpios);
+static const struct gpio_dt_spec red_led   = GPIO_DT_SPEC_GET(DT_ALIAS(led_red),   gpios);
+static const struct gpio_dt_spec blue_led  = GPIO_DT_SPEC_GET(DT_ALIAS(led_blue),  gpios);
 
 ////////////////////////////////////////////////////////////////////////////////////
 //  ____  _          _ _                                                 _
@@ -70,9 +70,9 @@ static int cmd_get(const struct shell *shell, size_t argc, char **argv) {
         shell_error(shell, "Cannot open file: %s", argv[1]);
         return -1;
     }
-    shell_print(shell, "MIME-Version: 1.0")
+    shell_print(shell, "MIME-Version: 1.0");
     shell_print(shell, "Content-Type: application/octet-stream; name=\"%s\"", argv[1]);
-    shell_print(shell, "Content-Transfer-Encoding: base64"
+    shell_print(shell, "Content-Transfer-Encoding: base64");
     shell_print(shell, "Content-Disposition: attachment; filename=\"%s\"", argv[1]);
     shell_fprintf(shell, SHELL_NORMAL, "\n"); // Flush
     
@@ -217,10 +217,10 @@ static int cmd_mount(const struct shell *shell, size_t argc, char **argv) {
 }
 
 // Register shell commands
-SHELL_CMD_REGISTER(ls, NULL, "List files", cmd_ls);
-SHELL_CMD_REGISTER(get, NULL, "Get file content", cmd_get);
-SHELL_CMD_REGISTER(write, NULL, "Write test file", cmd_write);
-SHELL_CMD_REGISTER(mount, NULL, "Mount filesystem", cmd_mount);
+SHELL_CMD_REGISTER(ls,     NULL, "List files", cmd_ls);
+SHELL_CMD_REGISTER(get,    NULL, "Get file content", cmd_get);
+SHELL_CMD_REGISTER(write,  NULL, "Write test file", cmd_write);
+SHELL_CMD_REGISTER(mount,  NULL, "Mount filesystem", cmd_mount);
 
 int main() {
     bool devicesOk = true;

@@ -8,8 +8,8 @@
 
 // GPIO definitions
 static const struct gpio_dt_spec green_led = GPIO_DT_SPEC_GET(DT_ALIAS(led_green), gpios);
-static const struct gpio_dt_spec red_led   = GPIO_DT_SPEC_GET(DT_ALIAS(led_red), gpios);
-static const struct gpio_dt_spec blue_led   = GPIO_DT_SPEC_GET(DT_ALIAS(led_blue), gpios);
+static const struct gpio_dt_spec red_led   = GPIO_DT_SPEC_GET(DT_ALIAS(led_red),   gpios);
+static const struct gpio_dt_spec blue_led  = GPIO_DT_SPEC_GET(DT_ALIAS(led_blue),  gpios);
 
 // Logger flag
 static atomic_t logger_enabled = ATOMIC_INIT(1);
@@ -96,7 +96,7 @@ K_THREAD_DEFINE(logger_thread_id, 1024, logger_thread, NULL, NULL, NULL, 5, 0, 0
 int main(void)
 {
     // Initialize LEDs
-    if (!device_is_ready(green_led.port) || !device_is_ready(red_led.port)) {
+    if (!device_is_ready(green_led.port) || !device_is_ready(red_led.port) || !device_is_ready(blue_led.port)) {
         printk("LED devices not ready\n");
         return -1;
     }
