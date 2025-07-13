@@ -1,0 +1,34 @@
+/ {
+    chosen {
+        zephyr,rtc = &pcf8563_rtc;
+    };
+    aliases {
+        rtc = &pcf8563_rtc;
+    };
+};
+
+&pinctrl {
+    i2c1_custom: i2c1_custom {
+        group1 {
+            pinmux= <I2C1_SDA_P14>, <I2C1_SCL_P15>;
+            input-enable;
+            input-schmitt-enable;
+            bias-pull-up;
+        };
+    };
+};
+
+&i2c1 {
+    status = "okay";
+    pinctrl-0 = <&i2c1_custom>;
+    pinctrl-names = "default";
+    clock-frequency = <I2C_BITRATE_STANDARD>;
+
+    pcf8563_rtc: pcf8563@51 {
+        compatible = "nxp,pcf8563";
+        reg = <0x51>;
+        status = "okay";
+    };
+
+};
+

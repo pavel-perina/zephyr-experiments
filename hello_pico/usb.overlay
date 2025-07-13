@@ -1,0 +1,14 @@
+/**
+ * From https://www.youtube.com/watch?v=t3nBOYfJrb8
+ * or https://docs.zephyrproject.org/latest/samples/subsys/usb/console/README.html
+ */
+/ {
+    chosen {
+        zephyr,console = &usb_cdc;
+    };
+};
+&zephyr_udc0 {
+    usb_cdc: usb_cdc_0 {
+        compatible = "zephyr,cdc-acm-uart";
+    };
+};

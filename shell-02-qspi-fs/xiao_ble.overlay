@@ -1,0 +1,20 @@
+/ {
+    aliases {
+        led-red   = &led0;
+        led-green = &led1;
+        led-blue  = &led2;
+    };
+};
+
+&p25q16h {
+    partitions {
+        compatible = "fixed-partitions";
+        #address-cells = <1>;
+        #size-cells = <1>;
+        
+        qspi_storage: partition@0 {
+            label = "qspi_storage";
+            reg = <0x00000000 0x00200000>; // 2MB (0x200000 bytes)
+        };
+    };
+};
