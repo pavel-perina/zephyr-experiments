@@ -283,8 +283,8 @@ void logger_thread(void) {
         }
 
         counter++;
-#if 0
-        if (counter % 10 == 0) {
+#if 1
+        if (counter % 20 == 0) {
             int sync_ret = fs_sync(&file);
             if (sync_ret < 0) {
                 printk("fs_sync failed: %d\n", sync_ret);
