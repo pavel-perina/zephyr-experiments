@@ -34,6 +34,7 @@ Available commands:
              devmem <address> [<width>]
              Write memory at address with mandatory width and value:
              devmem <address> <width> <value>
+  format   : Format filesystem (ERASES ALL FILES)
   get      : Get file content
   help     : Prints the help message.
   history  : Command history.
@@ -45,7 +46,9 @@ Available commands:
              readout fails. It must be executed after each terminal width change
              to ensure correct text display.
   retval   : Print return value of most recent command
+  rm       : Remove file
   shell    : Useful, not Unix-like shell commands.
+  umount   : Unmount filesystem
   write    : Write test file
 uart:~$ ls
 Cannot open directory, error: -2
@@ -98,6 +101,22 @@ KioqKioqKioqKioqKioqKioqKioqKioqKioqKioqKioqKioqKioqKioqKioqKioqKioqKioq
 KioqKioqKioqKioqKioqKioqKioqKioqKioqKioqKioqKioqKioqKioqKioqKioqKioqKioq
 KioqKioqKioqKioqKioqKioqKioqKioqKioqKioqKioqKioqKioqKioqKioqKioqKioqKioq
 KioqKioqKioqKioqKioqKioqKioqKioqKioqKioqKioqKioqKioqKioqKioqKioqKioqKg==
+uart:~$ rm 1.dat
+Deleted /lfs/1.dat
+uart:~$ umount
+Filesystem unmounted successfully
+uart:~$ format
+WARNING: This will erase all data on /lfs!
+Use: format --yes to confirm
+uart:~$ format --yes
+WARNING: This will erase all data on /lfs!
+Filesystem formatted successfully. Use 'mount' to remount.
+uart:~$ mount
+Checking flash area...
+Flash area OK
+Mounting filesystem...
+Filesystem mounted successfully
+uart:~$ ls
 uart:~$ %
 ```
 

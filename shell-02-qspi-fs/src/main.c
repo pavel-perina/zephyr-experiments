@@ -19,6 +19,9 @@ static const struct gpio_dt_spec green_led = GPIO_DT_SPEC_GET(DT_ALIAS(led_green
 static const struct gpio_dt_spec red_led   = GPIO_DT_SPEC_GET(DT_ALIAS(led_red),   gpios);
 static const struct gpio_dt_spec blue_led  = GPIO_DT_SPEC_GET(DT_ALIAS(led_blue),  gpios);
 
+static bool fs_mounted = false;
+static struct fs_mount_t mount;
+
 ////////////////////////////////////////////////////////////////////////////////////
 //  ____  _          _ _                                                 _
 // / ___|| |__   ___| | |   ___ ___  _ __ ___  _ __ ___   __ _ _ __   __| |___
@@ -177,7 +180,6 @@ static int cmd_write(const struct shell *shell, size_t argc, char **argv)
 
 // Shell command: mount filesystem
 static int cmd_mount(const struct shell *shell, size_t argc, char **argv) {
-    static bool fs_mounted = false;
     if (fs_mounted) {
         shell_print(shell, "Filesystem already mounted");
         return 0;
@@ -195,15 +197,13 @@ static int cmd_mount(const struct shell *shell, size_t argc, char **argv) {
 
     // Mount filesystem
     FS_LITTLEFS_DECLARE_DEFAULT_CONFIG(storage);
-    static struct fs_mount_t lfs_mount = {
-        .type = FS_LITTLEFS,
-        .fs_data = &storage,
-        .storage_dev = (void *)FIXED_PARTITION_ID(qspi_storage),
-        .mnt_point = "/lfs",
-    };
+    mount.type = FS_LITTLEFS,
+    mount.fs_data = &storage,
+    mount.storage_dev = (void *)FIXED_PARTITION_ID(qspi_storage),
+    mount.mnt_point = "/lfs",
 
     shell_print(shell, "Mounting filesystem...");
-    rc = fs_mount(&lfs_mount);
+    rc = fs_mount(&mount);
     if (rc != 0) {
         shell_error(shell, "Failed to mount filesystem: %d", rc);
         gpio_pin_set_dt(&red_led, 1);
@@ -216,11 +216,99 @@ static int cmd_mount(const struct shell *shell, size_t argc, char **argv) {
     return 0;
 }
 
+
+static int cmd_umount(const struct shell *shell, size_t argc, char **argv) {
+    if (!fs_mounted) {
+        shell_print(shell, "Filesystem not mounted");
+        return 0;
+    }
+
+    int rc = fs_unmount(&mount);
+    if (rc != 0) {
+        shell_error(shell, "Failed to unmount filesystem: %d", rc);
+        return rc;
+    }
+
+    fs_mounted = false;
+    gpio_pin_set_dt(&blue_led, 0);
+    shell_print(shell, "Filesystem unmounted successfully");
+    return 0;
+}
+
+static int cmd_rm(const struct shell *shell, size_t argc, char **argv) {
+    if (!fs_mounted) {
+        shell_error(shell, "Filesystem not mounted");
+        return -EINVAL;
+    }
+
+    if (argc < 2) {
+        shell_error(shell, "Usage: rm <filename>");
+        return -EINVAL;
+    }
+
+    char filepath[64];
+    snprintf(filepath, sizeof(filepath), "/lfs/%s", argv[1]);
+
+    int ret = fs_unlink(filepath);
+    if (ret < 0) {
+        shell_error(shell, "Failed to delete %s: %d", filepath, ret);
+        return ret;
+    }
+
+    shell_print(shell, "Deleted %s", filepath);
+    return 0;
+}
+
+static int cmd_format(const struct shell *shell, size_t argc, char **argv) {
+    shell_warn(shell, "WARNING: This will erase all data on /lfs!");
+
+    if (argc < 2 || strcmp(argv[1], "--yes") != 0) {
+        shell_print(shell, "Use: format --yes to confirm");
+        return -EINVAL;
+    }
+
+    int rc;
+
+    // Unmount if mounted
+    if (fs_mounted) {
+        rc = fs_unmount(&mount);
+        if (rc != 0) {
+            shell_error(shell, "Failed to unmount filesystem: %d", rc);
+            return rc;
+        }
+        fs_mounted = false;
+        gpio_pin_set_dt(&blue_led, 0);
+    }
+
+    // Open and erase flash area
+    const struct flash_area *fa;
+    rc = flash_area_open(FIXED_PARTITION_ID(qspi_storage), &fa);
+    if (rc != 0) {
+        shell_error(shell, "flash_area_open failed: %d", rc);
+        return rc;
+    }
+
+    rc = flash_area_erase(fa, 0, fa->fa_size);
+    flash_area_close(fa);
+    if (rc != 0) {
+        shell_error(shell, "flash_area_erase failed: %d", rc);
+        return rc;
+    }
+
+    shell_print(shell, "Filesystem formatted successfully. Use 'mount' to remount.");
+    return 0;
+}
+
+
 // Register shell commands
 SHELL_CMD_REGISTER(ls,     NULL, "List files", cmd_ls);
 SHELL_CMD_REGISTER(get,    NULL, "Get file content", cmd_get);
 SHELL_CMD_REGISTER(write,  NULL, "Write test file", cmd_write);
 SHELL_CMD_REGISTER(mount,  NULL, "Mount filesystem", cmd_mount);
+SHELL_CMD_REGISTER(umount, NULL, "Unmount filesystem", cmd_umount);
+SHELL_CMD_REGISTER(rm,     NULL, "Remove file", cmd_rm);
+SHELL_CMD_REGISTER(format, NULL, "Format filesystem (ERASES ALL FILES)", cmd_format);
+
 
 int main() {
     bool devicesOk = true;
