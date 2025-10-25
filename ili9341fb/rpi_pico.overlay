@@ -1,0 +1,43 @@
+// #include <zephyr/dt-bindings/display/ili9xxx.h>
+
+/ {
+	chosen {
+		zephyr,display = &ili9341;
+		zephyr,console = &usb_cdc;
+	};
+
+	mipi_dbi {
+		compatible		= "zephyr,mipi-dbi-spi";
+		spi-dev			= <&spi0>;
+		dc-gpios		= <&gpio0 20 GPIO_ACTIVE_HIGH>;
+		reset-gpios 	= <&gpio0 21 GPIO_ACTIVE_LOW>;
+		write-only;
+		#address-cells	= <1>;
+		#size-cells		= <0>;
+
+		ili9341: ili9341@0 {
+			compatible 			= "ilitek,ili9341";
+			mipi-max-frequency	= <15000000>;
+			reg 				= <0>;			// Uses cs-gpios[0]
+			width 				= <320>;
+			height 				= <240>;
+			rotation 			= <90>; // Default, portait 240x320, 90 landscape ...
+			status				= "okay";
+		};
+	};
+};
+
+&spi0 {
+	status			= "okay";
+	clock-frequency = <15000000>;
+	// Note: multiple devices can have CS pins configured here, separated by ","
+	// They are referenced via reg=<n>;
+	cs-gpios 		= <&gpio0 17 GPIO_ACTIVE_LOW>;
+};
+
+&zephyr_udc0 {
+	usb_cdc: usb_cdc_0 {
+		compatible = "zephyr,cdc-acm-uart";
+	};
+};
+
