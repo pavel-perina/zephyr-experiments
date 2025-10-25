@@ -1,0 +1,53 @@
+// https://github.com/zephyrproject-rtos/zephyr/issues/86929
+// https://www.seeedstudio.com/XIAO-RP2040-v1-0-p-5026.html
+// https://docs.zephyrproject.org/latest/boards/seeed/xiao_rp2040/doc/index.html
+// https://github.com/zephyrproject-rtos/zephyr/blob/main/boards/seeed/xiao_rp2040/xiao_rp2040.dts
+// zephyr/dts/bindings/display/sitronix,st7565-common.yaml
+
+
+/ {
+    chosen {
+        zephyr,display = &st7567;
+        zephyr,console = &usb_cdc;
+    };
+
+    mipi_dbi {
+        compatible      = "zephyr,mipi-dbi-spi";
+        spi-dev         = <&xiao_spi>;
+        dc-gpios        = <&gpio0 27 GPIO_ACTIVE_HIGH>; // pin P27/D1
+        reset-gpios     = <&gpio0 28 GPIO_ACTIVE_LOW>;  // pin P28/D2
+        write-only;
+        #address-cells  = <1>;
+        #size-cells     = <0>;
+
+        st7567: st7567@0 {
+            compatible          = "sitronix,st7567";
+            mipi-max-frequency  = <20000000>;       // 20MHz
+            mipi-mode = "MIPI_DBI_MODE_SPI_4WIRE";
+            reg                 = <0>;              // Uses cs-gpios[0]
+            width               = <128>;
+            height              = <64>;
+            status              = "okay";
+            column-offset       = <0>;
+            line-offset         = <0>;
+            regulation-ratio    = <0x3>;            // 3bits
+            //segment-invdir;                         // flipX=True
+            com-invdir;
+            bias;
+        };
+    };
+};
+
+
+// XIAO RP2040 SPI_TX P3, SPI_SCK P2
+&xiao_spi {
+    status          = "okay";
+    clock-frequency = <8000000>; // be safe
+    cs-gpios        = <&gpio0 26 GPIO_ACTIVE_LOW>;  // PIN D0/P26
+};
+
+&zephyr_udc0 {
+    usb_cdc: usb_cdc_0 {
+        compatible = "zephyr,cdc-acm-uart";
+    };
+};
