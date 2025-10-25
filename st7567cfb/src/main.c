@@ -33,6 +33,11 @@ int main()
     // Print available fonts
     uint8_t font_count = cfb_get_numof_fonts(display_dev);
     printk("Available fonts: %d\n", font_count);
+    for (uint8_t i = 0; i < font_count; ++i) {
+	uint8_t w, h;
+        cfb_get_font_size(display_dev, i, &w, &h);
+	printk("Font: %d %02dx%02d\n", i, w, h);
+    }
     
     // Set font (try font 0)
     cfb_framebuffer_set_font(display_dev, 0);
