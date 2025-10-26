@@ -3,12 +3,10 @@
 #include <zephyr/drivers/display.h>
 #include <lvgl.h>
 
-int main(void)
-{
+int main(void) {
     printk("Starting\n");
     k_msleep(100);
-    const struct device *display_dev;
-    display_dev = DEVICE_DT_GET(DT_CHOSEN(zephyr_display));
+    const struct device *display_dev = DEVICE_DT_GET(DT_CHOSEN(zephyr_display));
     
     if (!device_is_ready(display_dev)) {
         printk("Display not ready!\n");
@@ -26,6 +24,7 @@ int main(void)
     lv_obj_set_style_text_color(label, lv_color_white(), 0); // Text: 1 (pixels on)
 
     display_blanking_off(display_dev);
+
     printk("Entering loop\n");
     while (1) {
         if (lv_timer_handler() != LV_RES_OK) {
@@ -33,9 +32,8 @@ int main(void)
         }
         k_msleep(50);
     }
-    
+
     return 0;
 }
 
 /* vim: set expandtab shiftwidth=4 softtabstop=4 tabstop=4 : */
-

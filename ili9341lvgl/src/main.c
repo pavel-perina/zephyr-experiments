@@ -3,7 +3,9 @@
 #include <zephyr/drivers/display.h>
 #include <lvgl.h>
 #include <zephyr/logging/log.h>
+
 // https://docs.lvgl.io/9.4/examples.html
+
 LOG_MODULE_REGISTER(main, LOG_LEVEL_INF);
 
 static int display_caps(const struct device *dev) {
@@ -21,16 +23,10 @@ static int display_caps(const struct device *dev) {
 }
 
 int main(void) {
-    lv_init();
-    const struct device *display_dev;
-    lv_obj_t *screen;
-    lv_obj_t *label;
-    lv_obj_t *border_box;
-    
     LOG_INF("Starting LVGL Hello World example");
-
+    
     /* Get display device */
-    display_dev = DEVICE_DT_GET(DT_CHOSEN(zephyr_display));
+    const struct device* display_dev = DEVICE_DT_GET(DT_CHOSEN(zephyr_display));
     if (!device_is_ready(display_dev)) {
         LOG_ERR("Display device not ready");
         return -1;
@@ -41,29 +37,29 @@ int main(void) {
     display_blanking_off(display_dev);
 
     /* Create the main screen */
-    screen = lv_obj_create(NULL);
+    lv_obj_t* screen = lv_obj_create(NULL);
     lv_scr_load(screen);
 
     /* Set background color */
     lv_obj_set_style_bg_color(screen, lv_color_hex(0x000000), LV_PART_MAIN);
 
     /* Create a container box with border (frame around display) */
-    border_box = lv_obj_create(screen);
+    lv_obj_t *border_box = lv_obj_create(screen);
     lv_obj_set_size(border_box, LV_HOR_RES - 10, LV_VER_RES - 10);
     lv_obj_center(border_box);
     
     /* Style the border */
-    lv_obj_set_style_border_color(border_box, lv_color_hex(0x2d4f56), LV_PART_MAIN);
+    lv_obj_set_style_border_color(border_box, lv_color_hex(0xaab0ad), LV_PART_MAIN);
     lv_obj_set_style_border_width(border_box, 3, LV_PART_MAIN);
-    lv_obj_set_style_bg_color(border_box, lv_color_hex(0x152528), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(border_box, lv_color_hex(0xf6f2ee), LV_PART_MAIN);
     lv_obj_set_style_radius(border_box, 15, LV_PART_MAIN);
 
     /* Create label for "Hello World" */
-    label = lv_label_create(border_box);
+    lv_obj_t* label = lv_label_create(border_box);
     lv_label_set_text(label, "Hello World!");
 
     /* Style the label */
-    lv_obj_set_style_text_color(label, lv_color_hex(0xfda47f), LV_PART_MAIN);
+    lv_obj_set_style_text_color(label, lv_color_hex(0x4863b6), LV_PART_MAIN);
     lv_obj_set_style_text_font(label, &lv_font_montserrat_24, LV_PART_MAIN);
 
     /* Center the label in the border box */
@@ -73,10 +69,8 @@ int main(void) {
 
     /* Main loop */
     while (1) {
-        /* LVGL task handler - must be called periodically */
-        lv_timer_handler(); // random suggestion
+        lv_timer_handler();
         
-        /* Sleep to give CPU time to other tasks */
         k_msleep(10);
     }
 
@@ -84,4 +78,3 @@ int main(void) {
 }
 
 /* vim: set expandtab shiftwidth=4 softtabstop=4 tabstop=4 : */
-
