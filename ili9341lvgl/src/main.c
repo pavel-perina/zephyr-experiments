@@ -70,7 +70,6 @@ int main(void) {
     /* Main loop */
     while (1) {
         lv_timer_handler();
-        
         k_msleep(10);
     }
 
