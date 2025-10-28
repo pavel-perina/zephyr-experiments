@@ -1,0 +1,17 @@
+/ {
+    aliases {
+        env-sensor = &scd41;
+    };
+};
+
+
+&i2c1 {
+    status = "okay";
+
+    scd41: scd41@98 {
+        compatible = "sensirion,scd41";
+        reg = <0x62>;
+        mode = <0>; // Normal periodic measurement. Default interval of 5sec
+        status="okay";
+    };
+};

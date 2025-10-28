@@ -32,12 +32,11 @@
             line-offset         = <0>;
             regulation-ratio    = <0x3>;            // 3bits
             //segment-invdir;                         // flipX=True
-            com-invdir;
+            com-invdir;                             // flipY=True
             bias;
         };
     };
 };
-
 
 // XIAO RP2040 SPI_TX P3, SPI_SCK P2
 &xiao_spi {
@@ -51,3 +50,4 @@
         compatible = "zephyr,cdc-acm-uart";
     };
 };
+

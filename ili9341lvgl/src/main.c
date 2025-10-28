@@ -24,7 +24,7 @@ static int display_caps(const struct device *dev) {
 
 int main(void) {
     LOG_INF("Starting LVGL Hello World example");
-    
+
     /* Get display device */
     const struct device* display_dev = DEVICE_DT_GET(DT_CHOSEN(zephyr_display));
     if (!device_is_ready(display_dev)) {
@@ -47,7 +47,7 @@ int main(void) {
     lv_obj_t *border_box = lv_obj_create(screen);
     lv_obj_set_size(border_box, LV_HOR_RES - 10, LV_VER_RES - 10);
     lv_obj_center(border_box);
-    
+
     /* Style the border */
     lv_obj_set_style_border_color(border_box, lv_color_hex(0xaab0ad), LV_PART_MAIN);
     lv_obj_set_style_border_width(border_box, 3, LV_PART_MAIN);
