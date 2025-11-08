@@ -1,0 +1,87 @@
+/ {
+    chosen {
+        zephyr,display = &st7789;
+        zephyr,console = &usb_cdc;
+    };
+
+    aliases {
+        backlight = &backlight;
+    };
+
+    leds {
+        // TODO: RGB are GP26-28, BL is GP20
+        compatible = "gpio-leds";
+        // label: node name
+        backlight: backlight-led {
+            gpios = <&gpio0 20 GPIO_ACTIVE_HIGH>;
+        };
+    };
+
+    pwmleds {
+        compatible = "pwm-leds";
+    };
+
+    mipi_dbi {
+        compatible      = "zephyr,mipi-dbi-spi";
+        spi-dev         = <&spi0>;
+        dc-gpios        = <&gpio0 16 GPIO_ACTIVE_HIGH>;
+        //te-gpios        = <&gpio0 21>;
+        write-only;
+        #address-cells  = <1>;
+        #size-cells     = <0>;
+
+        st7789: st7789@0 {
+            compatible          = "sitronix,st7789v";
+            mipi-max-frequency  = <15000000>;
+            reg                 = <0>;      // Uses cs-gpios[0]
+            // https://shop.pimoroni.com/products/pico-display-pack-2-8?variant=42047194005587
+            // https://cdn.shopify.com/s/files/1/0174/1800/files/pico_display_2_8_schematic.pdf?v=1728314048
+            // https://docs.zephyrproject.org/latest/build/dts/api/bindings/display/sitronix%2Cst7789v.html
+            // https://github.com/pimoroni/pimoroni-pico/blob/main/drivers/st7789/st7789.cpp
+            // https://github.com/zephyrproject-rtos/zephyr/blob/9da1b3cba1a2a8a448c8650fb30b38b570a9b9de/boards/fanke/fk750m1_vbt6/fk750m1_vbt6.dts#L23
+            x-offset    = <0>;
+            y-offset    = <0>;
+            width       = <240>;
+            height      = <320>;
+            gctrl       = <0x35>; // Gate control
+            vcom        = <0x1f>; // VCOM Setting
+            pvgam-param = [D0 08 11 08 0C 15 39 33 50 36 13 14 29 2D];
+            nvgam-param = [D0 08 10 08 06 06 39 44 51 0B 16 14 2F 31];
+            // TODO: te-on -> likely not supported by driver
+            colmod      = <5>; // 16bpp hicolor
+
+            porch-param = [0c 0c 00 33 33];
+            lcm         = <0x2c>;
+            // vdvvrhen 0x01 - maybe set by driver?
+            vrhs = <0x12>;
+            vdvs = <0x20>;
+            pwctrl1-param = [a4 a1];
+            // these commands are copied from random 240x240 board
+            mdac = <0x00>;
+            gamma = <0x01>;
+            cmd2en-param = [5a 69 02 01];
+            ram-param = [00 F0]; // seen also f8
+            rgb-param = [CD 08 14];
+            mipi-mode = "MIPI_DBI_MODE_SPI_4WIRE";
+
+            // Rotation is not supported by driver
+            //rotation            = <90>;     // Default, portait 240x320, 90 landscape ...
+            status              = "okay";
+        };
+
+    };
+};
+
+&spi0 {
+    status          = "okay";
+    clock-frequency = <15000000>;
+    // Note: multiple devices can have CS pins configured here, separated by ","
+    // They are referenced via reg=<n>;
+    cs-gpios        = <&gpio0 17 GPIO_ACTIVE_LOW>;
+};
+
+&zephyr_udc0 {
+    usb_cdc: usb_cdc_0 {
+        compatible = "zephyr,cdc-acm-uart";
+    };
+};
