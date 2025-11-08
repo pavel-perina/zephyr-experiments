@@ -16,13 +16,14 @@ int sensor_print_helper(const struct device *const sensor, int channel, const ch
 }
 
 int main(void) {
-    printk("Starting");
+    printk("Starting\n");
     if (!device_is_ready(sensor)) {
         printk("Sensor not ready!\n");
         return -1;
     }
 
     while (1) {
+        printk("Loop\n");
         int ret= sensor_sample_fetch(sensor);
         if (ret != 0) {
             printk("sensor_sample_fetch returned %d\n", ret);

@@ -1,0 +1,34 @@
+/* rpi_pico2_rp2350a_m33 -b rpi_pico2/rp2350a/m33 */
+/ {
+    aliases {
+        env-sensor = &scd41;
+    };
+};
+
+&pinctrl {
+    i2c0_custom: i2c0_custom {
+        group1 {
+            pinmux = <I2C0_SDA_P16>;
+            input-enable;
+            input-schmitt-enable;
+            bias-pull-up;
+        };
+        group2 {
+            pinmux = <I2C0_SCL_P17>;
+            bias-pull-up;
+        };
+    };
+};
+
+&i2c0 {
+    status = "okay";
+    pinctrl-0 = <&i2c0_custom>;
+    pinctrl-names = "default";
+    
+    scd41: scd41@62 {
+        compatible = "sensirion,scd41";
+        reg = <0x62>;
+        mode = <0>; // Normal periodic measurement. Default interval of 5sec
+        status="okay";
+    };
+};
