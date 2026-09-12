@@ -56,6 +56,26 @@ Progress so far:
    and audibly, on real Pico 1 (RP2040) hardware - full parity with the
    bare-metal player achieved.
 
+## No standalone Pico SDK needed
+
+Every `hardware/*.h` header used above (`hardware/pio.h`, `hardware/clocks.h`,
+`hardware/structs/pwm.h`, ...) comes from `hal_rpi_pico`, a Zephyr-managed
+module fetched by `west update` per this workspace's manifest - a separate
+checkout from `~/.pico-sdk` (the standalone Pico SDK install used by the
+bare-metal `pico_mplay` project), not a dependency on it. Cloning this
+workspace and running `west update` is enough; the standalone SDK is never
+touched. The include paths aren't set up by this app's `CMakeLists.txt`
+either - they're wired in globally by Zephyr's own RP2040/2350 support,
+since Zephyr's in-tree drivers (`pwm_rpi_pico.c`, `dma_rpi_pico.c`,
+`pio_rpi_pico.c`) need exactly the same headers, confirmed by checking the
+actual `-I` flags in `build/compile_commands.json`. Worth noting: since the
+two SDK checkouts are tracked completely independently, they could in
+principle drift apart over time (different pinned versions/patches) even
+though they're the same lineage - it happened to work seamlessly here
+(the bare-metal build's pioasm-compiled PIO bytes ran correctly against
+this workspace's headers/register offsets), but that's not a guarantee
+that holds forever.
+
 Build (Pico 2, non-W - the /w variant is currently broken, see hello_pico's
 README):
 ```

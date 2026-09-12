@@ -71,6 +71,10 @@ static int playing;
 static struct PlayerState player;
 static int16_t mono_scratch[BUF_LEN];
 
+/* Renders BUF_LEN mono samples from the MOD mixer, then packs each one into
+ * a stereo I2S frame (same value in both channels) matching what
+ * i2s_out.pio expects from the FIFO: [left:16][right:16] in one 32-bit word.
+ */
 static void fill_buffer(uint32_t *b)
 {
 	mod_player_produce(&player, mono_scratch, BUF_LEN);
@@ -80,6 +84,13 @@ static void fill_buffer(uint32_t *b)
 	}
 }
 
+/* Fires once DMA finishes streaming one of the two buffers. Immediately
+ * hands the *other* buffer (already filled last time round) back to DMA to
+ * keep the gap minimal, then refills the buffer that just finished playing
+ * for next time - the same ping-pong pattern as the bare-metal version,
+ * just driven through Zephyr's dma_reload()/dma_start() instead of a raw
+ * pico-sdk DMA retrigger.
+ */
 static void dma_done(const struct device *dev, void *user_data, uint32_t channel, int status)
 {
 	ARG_UNUSED(dev);
@@ -100,6 +111,11 @@ static void dma_done(const struct device *dev, void *user_data, uint32_t channel
 
 int main(void)
 {
+	/* &pio0 and &dma are enabled in the per-board overlays under boards/;
+	 * pio_dev only exists to allocate a state machine and get the raw
+	 * PIO handle - everything else is driven through direct pico-sdk
+	 * calls below.
+	 */
 	const struct device *pio_dev = DEVICE_DT_GET(DT_NODELABEL(pio0));
 
 	dma_dev = DEVICE_DT_GET(DT_NODELABEL(dma));
@@ -115,23 +131,40 @@ int main(void)
 		return 0;
 	}
 
+	/* Load the program bytes from i2s_out_pio.h into PIO instruction
+	 * memory and get back where it landed (offset).
+	 */
 	uint offset = pio_add_program(pio, RPI_PICO_PIO_GET_PROGRAM(i2s_out));
+
+	/* i2s_out.pio spends 2 PIO cycles per bit and 2*BITS_PER_CHANNEL bits
+	 * per stereo frame, so the SM must run at SAMPLE_RATE_HZ * 4 *
+	 * BITS_PER_CHANNEL to make one frame take exactly one sample period -
+	 * same formula as the bare-metal version.
+	 */
 	float clkdiv = (float)clock_get_hz(clk_sys) / (float)(SAMPLE_RATE_HZ * 4u * BITS_PER_CHANNEL);
 
+	/* Route GP26/27 (BCLK/WS) and GP28 (DATA) to this PIO block and set
+	 * them as outputs - raw pico-sdk calls, no Zephyr pinctrl involved.
+	 */
 	pio_gpio_init(pio, PIN_BCLK);
 	pio_gpio_init(pio, PIN_BCLK + 1);
 	pio_gpio_init(pio, PIN_DATA);
 	pio_sm_set_consecutive_pindirs(pio, sm, PIN_BCLK, 2, true);
 	pio_sm_set_consecutive_pindirs(pio, sm, PIN_DATA, 1, true);
 
+	/* Same SM configuration as i2s_out_program_init() in the bare-metal
+	 * project's generated header - reconstructed by hand here since
+	 * Zephyr's generic RPI_PICO_PIO_DEFINE_PROGRAM macro only captures
+	 * wrap_target/wrap, not a program-specific default-config helper.
+	 */
 	pio_sm_config c = pio_get_default_sm_config();
 	sm_config_set_wrap(&c, offset + RPI_PICO_PIO_GET_WRAP_TARGET(i2s_out),
 			    offset + RPI_PICO_PIO_GET_WRAP(i2s_out));
-	sm_config_set_sideset(&c, 2, false, false);
+	sm_config_set_sideset(&c, 2, false, false);          /* BCLK+WS, 2 bits */
 	sm_config_set_sideset_pins(&c, PIN_BCLK);
 	sm_config_set_out_pins(&c, PIN_DATA, 1);
-	sm_config_set_out_shift(&c, false, true, 32);
-	sm_config_set_fifo_join(&c, PIO_FIFO_JOIN_TX);
+	sm_config_set_out_shift(&c, false, true, 32);        /* MSB-first, autopull every 32 bits */
+	sm_config_set_fifo_join(&c, PIO_FIFO_JOIN_TX);       /* 8-deep TX FIFO, no RX needed */
 	sm_config_set_clkdiv(&c, clkdiv);
 	pio_sm_init(pio, sm, offset, &c);
 
@@ -140,6 +173,9 @@ int main(void)
 		return 0;
 	}
 
+	/* Pre-fill both buffers before DMA/PIO start moving, then remember
+	 * the PIO's TX FIFO address as the fixed DMA destination.
+	 */
 	fill_buffer(buf[0]);
 	fill_buffer(buf[1]);
 	playing = 0;
@@ -152,6 +188,9 @@ int main(void)
 	}
 	dma_channel = (uint32_t)ch;
 
+	/* One 32-bit stereo frame per transfer, source address walks buf[0],
+	 * destination is the PIO FIFO register and never moves.
+	 */
 	struct dma_block_config block = {
 		.source_address = (uintptr_t)buf[0],
 		.dest_address = (uintptr_t)txf,
@@ -159,6 +198,10 @@ int main(void)
 		.source_addr_adj = DMA_ADDR_ADJ_INCREMENT,
 		.dest_addr_adj = DMA_ADDR_ADJ_NO_CHANGE,
 	};
+	/* dma_slot paces the channel from the PIO SM's own TX DREQ (fires
+	 * whenever the FIFO has room), same DREQ pio_get_dreq() would give
+	 * the bare-metal version - just wrapped for Zephyr's dma_slot field.
+	 */
 	struct dma_config cfg = {
 		.channel_direction = MEMORY_TO_PERIPHERAL,
 		.source_data_size = 4,
@@ -173,11 +216,19 @@ int main(void)
 
 	dma_config(dma_dev, dma_channel, &cfg);
 
+	/* Enable the SM before the first DMA transfer, same order as the
+	 * bare-metal version, so it's already waiting on the FIFO rather
+	 * than racing the first transfer.
+	 */
 	pio_sm_set_enabled(pio, sm, true);
 	dma_start(dma_dev, dma_channel);
 
 	printk("mod player running\n");
 	while (1) {
+		/* Software-only sanity check, same as bare-metal: position/row
+		 * should visibly advance through the song regardless of
+		 * whether anything is audible.
+		 */
 		printk("pos=%d row=%d\n", player.current_position, player.current_row);
 		k_msleep(1000);
 	}
