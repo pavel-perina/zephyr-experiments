@@ -1,5 +1,13 @@
 /*
- * Step 3: PIO I2S transmitter + DMA, real audio to a MAX98357A speaker.
+ * Step 4: real Amiga MOD playback, same PIO/DMA I2S backend as step 3.
+ *
+ * mod_player.c/h (ported here unmodified from ~/devel/pico_mplay - it was
+ * already pure C with zero pico-sdk/Zephyr dependency) replaces the sweep
+ * generator as the sample source. mod_player_produce() doesn't care how
+ * many samples are requested or when, so it drops straight into
+ * fill_buffer() exactly like it does in the bare-metal version - the only
+ * change from step 3 is what fill_buffer() calls to get mono samples
+ * before packing them into stereo I2S frames.
  *
  * Reuses ~/devel/pico_mplay's i2s_out.pio verbatim (see i2s_out_pio.h) via
  * Zephyr's pio_rpi_pico driver, which handles state-machine allocation and
@@ -14,11 +22,8 @@
  * as the bare-metal version) handle routing GP26/27/28 to the PIO block
  * directly - no Zephyr pinctrl devicetree group needed for this peripheral.
  *
- * Test signal: the same repeating logarithmic sweep (20Hz-20kHz over 5s)
- * used to first bring up the bare-metal I2S transmitter - a more
- * informative smoke test than a fixed tone, since wrong wiring/timing
- * tends to produce silence, noise, or an audibly broken sweep rather than
- * a clean one.
+ * The MOD file (mod_data[]/mod_data_len) is generated at build time from
+ * AXEL_F.MOD into the build directory - see CMakeLists.txt.
  */
 
 #include <zephyr/kernel.h>
@@ -41,13 +46,10 @@
 #undef pio0
 #undef pio1
 #include <hardware/clocks.h>
-#include <math.h>
 
 #include "i2s_out_pio.h"
-
-#ifndef M_PI
-#define M_PI 3.14159265358979323846
-#endif
+#include "mod_player.h"
+#include "mod_data.h"
 
 #define PIN_BCLK 26   /* WS/LRCLK is PIN_BCLK+1 (GP27) - side-set requirement */
 #define PIN_DATA 28
@@ -55,14 +57,7 @@
 #define SAMPLE_RATE_HZ   48000u
 #define BITS_PER_CHANNEL 16u
 
-#define SWEEP_FREQ_START 20.0f
-#define SWEEP_FREQ_END   20000.0f
-#define SWEEP_DURATION_S 5.0f
-#define AMPLITUDE        8000
-
-#define BUF_LEN          256   /* stereo frames/buffer */
-#define SINE_TABLE_BITS  10
-#define SINE_TABLE_LEN   (1 << SINE_TABLE_BITS)
+#define BUF_LEN 256   /* stereo frames/buffer */
 
 static const struct device *dma_dev;
 static PIO pio;
@@ -73,27 +68,15 @@ static volatile uint32_t *txf;
 static uint32_t buf[2][BUF_LEN];
 static int playing;
 
-static uint32_t phase;
-static float phase_inc_scale;
-static float sweep_freq_hz;
-static float sweep_growth_per_sample;
-static uint32_t sweep_sample_count;
-static uint32_t sweep_total_samples;
-static int16_t sine_table[SINE_TABLE_LEN];
+static struct PlayerState player;
+static int16_t mono_scratch[BUF_LEN];
 
 static void fill_buffer(uint32_t *b)
 {
+	mod_player_produce(&player, mono_scratch, BUF_LEN);
 	for (int i = 0; i < BUF_LEN; i++) {
-		int16_t sample = sine_table[phase >> (32 - SINE_TABLE_BITS)];
-		b[i] = ((uint32_t)(uint16_t)sample << 16) | (uint16_t)sample;
-
-		phase += (uint32_t)(sweep_freq_hz * phase_inc_scale);
-		sweep_freq_hz *= sweep_growth_per_sample;
-
-		if (++sweep_sample_count >= sweep_total_samples) {
-			sweep_freq_hz = SWEEP_FREQ_START;
-			sweep_sample_count = 0;
-		}
+		uint16_t sample = (uint16_t)mono_scratch[i];
+		b[i] = ((uint32_t)sample << 16) | sample;
 	}
 }
 
@@ -152,16 +135,10 @@ int main(void)
 	sm_config_set_clkdiv(&c, clkdiv);
 	pio_sm_init(pio, sm, offset, &c);
 
-	for (int i = 0; i < SINE_TABLE_LEN; i++) {
-		float angle = 2.0f * (float)M_PI * (float)i / (float)SINE_TABLE_LEN;
-		sine_table[i] = (int16_t)(sinf(angle) * (float)AMPLITUDE);
+	if (mod_player_init(&player, mod_data, mod_data_len) != 0) {
+		printk("mod_player_init failed - bad or unrecognized MOD data\n");
+		return 0;
 	}
-
-	phase_inc_scale = 4294967296.0f / (float)SAMPLE_RATE_HZ;
-	sweep_freq_hz = SWEEP_FREQ_START;
-	sweep_total_samples = (uint32_t)(SWEEP_DURATION_S * (float)SAMPLE_RATE_HZ);
-	sweep_growth_per_sample =
-		powf(SWEEP_FREQ_END / SWEEP_FREQ_START, 1.0f / (float)sweep_total_samples);
 
 	fill_buffer(buf[0]);
 	fill_buffer(buf[1]);
@@ -199,8 +176,9 @@ int main(void)
 	pio_sm_set_enabled(pio, sm, true);
 	dma_start(dma_dev, dma_channel);
 
-	printk("I2S sweep running\n");
+	printk("mod player running\n");
 	while (1) {
+		printk("pos=%d row=%d\n", player.current_position, player.current_row);
 		k_msleep(1000);
 	}
 	return 0;

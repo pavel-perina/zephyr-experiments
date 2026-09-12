@@ -42,9 +42,19 @@ Progress so far:
    Verified playing the same logarithmic sweep test tone as the bare-metal
    I2S bring-up, audibly, on real Pico 1 (RP2040) hardware.
 
-Next: port `mod_player.c`/`mod_player.h` (pure C, no pico-sdk/Zephyr
-dependency already) and an embedded MOD file, replacing the sweep
-generator - the same last step the bare-metal version took.
+4. **Full MOD playback** (current `src/main.c`) - `mod_player.c`/`.h`
+   copied over unmodified (they had zero pico-sdk/Zephyr dependency
+   already, just standard C) replace the sweep generator as the sample
+   source; `fill_buffer()` calls `mod_player_produce()` instead, same
+   packing into stereo I2S frames as before. The MOD file (`AXEL_F.MOD`,
+   checked into the repo) is embedded via the same CMake
+   `add_custom_command` + `xxd -i` approach as the bare-metal project,
+   generating `mod_data.h` into the build directory rather than committing
+   a much larger generated header - see `CMakeLists.txt`. Built and linked
+   on the first try; no picolibc heap/malloc issues surfaced. Verified
+   playing correctly (position/row advancing through multiple patterns)
+   and audibly, on real Pico 1 (RP2040) hardware - full parity with the
+   bare-metal player achieved.
 
 Build (Pico 2, non-W - the /w variant is currently broken, see hello_pico's
 README):
