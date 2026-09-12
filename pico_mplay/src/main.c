@@ -1,63 +1,99 @@
 /*
- * Step 2: DMA + PWM via Zephyr's own driver APIs (not the raw pico-sdk HAL),
- * reproducing pico_mplay's original bare-metal step 1: a DMA channel
- * streams a slow (LED-visible, ~4 Hz) sine wave's duty-cycle values into a
- * PWM slice's compare register, paced by that slice's own wrap DREQ.
+ * Step 3: PIO I2S transmitter + DMA, real audio to a MAX98357A speaker.
  *
- * Zephyr's PWM API has no concept of a DMA-fed duty stream (it's a
- * one-shot "set period+pulse" abstraction, same as most vendor-neutral PWM
- * APIs), so the pattern here is hybrid: Zephyr's pwm.h sets up the slice's
- * period once, then DMA writes duty values directly into the raw hardware
- * register (pwm_hw, from the same pico-sdk HAL header the Zephyr PWM
- * driver itself is built on) on every wrap. Zephyr's dma.h driver has no
- * built-in "repeat forever" mode either (dma_config's `cyclic` flag isn't
- * implemented by this SoC's driver) - like the bare-metal version, this
- * manually re-arms the DMA channel from its own completion callback.
+ * Reuses ~/devel/pico_mplay's i2s_out.pio verbatim (see i2s_out_pio.h) via
+ * Zephyr's pio_rpi_pico driver, which handles state-machine allocation and
+ * program loading but - like Zephyr's PWM API in step 2 - has no concept
+ * of a DMA-fed streaming consumer for a custom PIO program. So the pattern
+ * is the same as step 2: Zephyr's driver does the one-time setup (here,
+ * allocating the SM and loading the program), then DMA is configured and
+ * manually re-armed from its own completion callback via zephyr/drivers/dma.h,
+ * writing 32-bit stereo frames directly into the PIO's TX FIFO register.
+ *
+ * pio_gpio_init()/pio_sm_set_consecutive_pindirs() (raw pico-sdk calls, same
+ * as the bare-metal version) handle routing GP26/27/28 to the PIO block
+ * directly - no Zephyr pinctrl devicetree group needed for this peripheral.
+ *
+ * Test signal: the same repeating logarithmic sweep (20Hz-20kHz over 5s)
+ * used to first bring up the bare-metal I2S transmitter - a more
+ * informative smoke test than a fixed tone, since wrong wiring/timing
+ * tends to produce silence, noise, or an audibly broken sweep rather than
+ * a clean one.
  */
 
 #include <zephyr/kernel.h>
 #include <zephyr/device.h>
-#include <zephyr/drivers/pwm.h>
 #include <zephyr/drivers/dma.h>
+#include <zephyr/drivers/misc/pio_rpi_pico/pio_rpi_pico.h>
 #if defined(CONFIG_SOC_SERIES_RP2350)
 #include <zephyr/dt-bindings/dma/rpi-pico-dma-rp2350.h>
 #else
 #include <zephyr/dt-bindings/dma/rpi-pico-dma-rp2040.h>
 #endif
-#include <hardware/structs/pwm.h>
+#include <hardware/pio.h>
+/*
+ * pico-sdk's hardware/pio.h #defines pio0/pio1 as its own PIO-instance
+ * singletons (`#define pio0 pio0_hw`), which collides with Zephyr's
+ * DT_NODELABEL(pio0) token-pasting macro below - both want the bare
+ * identifier. We never use the pico-sdk singletons (PIO comes from
+ * pio_rpi_pico_get_pio() instead), so just get them out of the way.
+ */
+#undef pio0
+#undef pio1
+#include <hardware/clocks.h>
 #include <math.h>
+
+#include "i2s_out_pio.h"
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
 
-/* GPIO25 = PWM slice 4, channel B on both rpi_pico and rpi_pico2 (see
- * pwm_ch4b_default in boards/common/rpi_pico-pinctrl-common.dtsi).
- * Zephyr's PWM "channel" numbering is slice*2 + (0=A, 1=B).
- */
-#define PWM_SLICE   4
-#define PWM_CHANNEL (PWM_SLICE * 2 + 1)
+#define PIN_BCLK 26   /* WS/LRCLK is PIN_BCLK+1 (GP27) - side-set requirement */
+#define PIN_DATA 28
 
-#define WAVE_FREQ_HZ 4.0f
-#define BUF_LEN      128
+#define SAMPLE_RATE_HZ   48000u
+#define BITS_PER_CHANNEL 16u
 
-static const struct device *pwm_dev;
+#define SWEEP_FREQ_START 20.0f
+#define SWEEP_FREQ_END   20000.0f
+#define SWEEP_DURATION_S 5.0f
+#define AMPLITUDE        8000
+
+#define BUF_LEN          256   /* stereo frames/buffer */
+#define SINE_TABLE_BITS  10
+#define SINE_TABLE_LEN   (1 << SINE_TABLE_BITS)
+
 static const struct device *dma_dev;
+static PIO pio;
+static size_t sm;
 static uint32_t dma_channel;
-static volatile uint16_t *cc_half;   /* channel B = high half of slice[4].cc */
+static volatile uint32_t *txf;
 
-static uint16_t buf[2][BUF_LEN];
+static uint32_t buf[2][BUF_LEN];
 static int playing;
-static uint32_t phase;
-static uint32_t phase_inc;
-static uint32_t pwm_top;
 
-static void fill_buffer(uint16_t *b)
+static uint32_t phase;
+static float phase_inc_scale;
+static float sweep_freq_hz;
+static float sweep_growth_per_sample;
+static uint32_t sweep_sample_count;
+static uint32_t sweep_total_samples;
+static int16_t sine_table[SINE_TABLE_LEN];
+
+static void fill_buffer(uint32_t *b)
 {
 	for (int i = 0; i < BUF_LEN; i++) {
-		float s = sinf(2.0f * (float)M_PI * (float)phase / 4294967296.0f);
-		b[i] = (uint16_t)((s + 1.0f) * 0.5f * (float)pwm_top);
-		phase += phase_inc;
+		int16_t sample = sine_table[phase >> (32 - SINE_TABLE_BITS)];
+		b[i] = ((uint32_t)(uint16_t)sample << 16) | (uint16_t)sample;
+
+		phase += (uint32_t)(sweep_freq_hz * phase_inc_scale);
+		sweep_freq_hz *= sweep_growth_per_sample;
+
+		if (++sweep_sample_count >= sweep_total_samples) {
+			sweep_freq_hz = SWEEP_FREQ_START;
+			sweep_sample_count = 0;
+		}
 	}
 }
 
@@ -66,19 +102,13 @@ static void dma_done(const struct device *dev, void *user_data, uint32_t channel
 	ARG_UNUSED(dev);
 	ARG_UNUSED(user_data);
 	ARG_UNUSED(channel);
-
 	if (status < 0) {
 		return;
 	}
 
-	/* Simplification vs. the bare-metal version: buffer refill happens
-	 * directly in the completion callback instead of being handed off
-	 * to a thread via a semaphore/work item. Fine for a small, cheap
-	 * sine fill; a real (audio-rate) player would defer this.
-	 */
 	int next = 1 - playing;
-	dma_reload(dma_dev, dma_channel, (uintptr_t)buf[next], (uintptr_t)cc_half,
-		   BUF_LEN * sizeof(uint16_t));
+	dma_reload(dma_dev, dma_channel, (uintptr_t)buf[next], (uintptr_t)txf,
+		   BUF_LEN * sizeof(uint32_t));
 	dma_start(dma_dev, dma_channel);
 	playing = next;
 
@@ -87,33 +117,56 @@ static void dma_done(const struct device *dev, void *user_data, uint32_t channel
 
 int main(void)
 {
-	pwm_dev = DEVICE_DT_GET(DT_NODELABEL(pwm));
+	const struct device *pio_dev = DEVICE_DT_GET(DT_NODELABEL(pio0));
+
 	dma_dev = DEVICE_DT_GET(DT_NODELABEL(dma));
 
-	if (!device_is_ready(pwm_dev) || !device_is_ready(dma_dev)) {
-		printk("pwm or dma device not ready\n");
+	if (!device_is_ready(pio_dev) || !device_is_ready(dma_dev)) {
+		printk("pio or dma device not ready\n");
 		return 0;
 	}
 
-	uint64_t cycles_per_sec;
-	pwm_get_cycles_per_sec(pwm_dev, PWM_CHANNEL, &cycles_per_sec);
+	pio = pio_rpi_pico_get_pio(pio_dev);
+	if (pio_rpi_pico_allocate_sm(pio_dev, &sm) != 0) {
+		printk("no free PIO state machine\n");
+		return 0;
+	}
 
-	/* Same "sample rate" concept as the bare-metal version: the PWM
-	 * slice wraps (and DMA supplies the next duty value) at 48 kHz,
-	 * while the wave itself stays slow enough to see on the LED.
-	 */
-	uint32_t period_cycles = (uint32_t)(cycles_per_sec / 48000);
-	pwm_top = period_cycles - 1;
-	pwm_set_cycles(pwm_dev, PWM_CHANNEL, period_cycles, 0, 0);
+	uint offset = pio_add_program(pio, RPI_PICO_PIO_GET_PROGRAM(i2s_out));
+	float clkdiv = (float)clock_get_hz(clk_sys) / (float)(SAMPLE_RATE_HZ * 4u * BITS_PER_CHANNEL);
 
-	cc_half = (volatile uint16_t *)&pwm_hw->slice[PWM_SLICE].cc + 1;
+	pio_gpio_init(pio, PIN_BCLK);
+	pio_gpio_init(pio, PIN_BCLK + 1);
+	pio_gpio_init(pio, PIN_DATA);
+	pio_sm_set_consecutive_pindirs(pio, sm, PIN_BCLK, 2, true);
+	pio_sm_set_consecutive_pindirs(pio, sm, PIN_DATA, 1, true);
 
-	phase_inc = (uint32_t)((double)WAVE_FREQ_HZ / 48000.0 * 4294967296.0);
-	printk("cycles_per_sec=%llu period_cycles=%u pwm_top=%u phase_inc=%u\n",
-	       cycles_per_sec, period_cycles, pwm_top, phase_inc);
+	pio_sm_config c = pio_get_default_sm_config();
+	sm_config_set_wrap(&c, offset + RPI_PICO_PIO_GET_WRAP_TARGET(i2s_out),
+			    offset + RPI_PICO_PIO_GET_WRAP(i2s_out));
+	sm_config_set_sideset(&c, 2, false, false);
+	sm_config_set_sideset_pins(&c, PIN_BCLK);
+	sm_config_set_out_pins(&c, PIN_DATA, 1);
+	sm_config_set_out_shift(&c, false, true, 32);
+	sm_config_set_fifo_join(&c, PIO_FIFO_JOIN_TX);
+	sm_config_set_clkdiv(&c, clkdiv);
+	pio_sm_init(pio, sm, offset, &c);
+
+	for (int i = 0; i < SINE_TABLE_LEN; i++) {
+		float angle = 2.0f * (float)M_PI * (float)i / (float)SINE_TABLE_LEN;
+		sine_table[i] = (int16_t)(sinf(angle) * (float)AMPLITUDE);
+	}
+
+	phase_inc_scale = 4294967296.0f / (float)SAMPLE_RATE_HZ;
+	sweep_freq_hz = SWEEP_FREQ_START;
+	sweep_total_samples = (uint32_t)(SWEEP_DURATION_S * (float)SAMPLE_RATE_HZ);
+	sweep_growth_per_sample =
+		powf(SWEEP_FREQ_END / SWEEP_FREQ_START, 1.0f / (float)sweep_total_samples);
+
 	fill_buffer(buf[0]);
 	fill_buffer(buf[1]);
 	playing = 0;
+	txf = &pio->txf[sm];
 
 	int ch = dma_request_channel(dma_dev, NULL);
 	if (ch < 0) {
@@ -124,27 +177,29 @@ int main(void)
 
 	struct dma_block_config block = {
 		.source_address = (uintptr_t)buf[0],
-		.dest_address = (uintptr_t)cc_half,
-		.block_size = BUF_LEN * sizeof(uint16_t),
+		.dest_address = (uintptr_t)txf,
+		.block_size = BUF_LEN * sizeof(uint32_t),
 		.source_addr_adj = DMA_ADDR_ADJ_INCREMENT,
 		.dest_addr_adj = DMA_ADDR_ADJ_NO_CHANGE,
 	};
 	struct dma_config cfg = {
 		.channel_direction = MEMORY_TO_PERIPHERAL,
-		.source_data_size = 2,
-		.dest_data_size = 2,
+		.source_data_size = 4,
+		.dest_data_size = 4,
 		.source_burst_length = 1,
 		.dest_burst_length = 1,
 		.block_count = 1,
 		.head_block = &block,
-		.dma_slot = RPI_PICO_DMA_SLOT_PWM_WRAP4,
+		.dma_slot = RPI_PICO_DMA_DREQ_TO_SLOT(pio_get_dreq(pio, sm, true)),
 		.dma_callback = dma_done,
 	};
 
 	dma_config(dma_dev, dma_channel, &cfg);
+
+	pio_sm_set_enabled(pio, sm, true);
 	dma_start(dma_dev, dma_channel);
 
-	printk("DMA+PWM breathing LED running\n");
+	printk("I2S sweep running\n");
 	while (1) {
 		k_msleep(1000);
 	}

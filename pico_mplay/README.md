@@ -23,12 +23,28 @@ Progress so far:
    printout that `cycles_per_sec`/`period_cycles`/`phase_inc` match the
    bare-metal calculation exactly (150 MHz / 3125 cycles / 4 Hz on Pico 2).
 
-Next: PIO has no pioasm/CMake integration in Zephyr - programs must be
-embedded as pre-assembled 16-bit opcode arrays by hand (see the in-tree
-`drivers/led_strip/ws2812_rpi_pico_pio.c` for what that looks like). That's
-its own dedicated step, deferred until DMA/PWM were proven working here
-first. I2S (needing a custom PIO transmitter, same as bare-metal) follows
-after that.
+3. **PIO + DMA I2S** (current `src/main.c`) - real audio to a MAX98357A
+   speaker via the bare-metal project's `i2s_out.pio` transmitter, reused
+   as-is (not reimplemented): its pioasm-compiled instruction bytes are
+   lifted straight from that project's generated `build/i2s_out.pio.h` into
+   `src/i2s_out_pio.h` here via Zephyr's `RPI_PICO_PIO_DEFINE_PROGRAM`
+   macro - see that header's comment for why (Zephyr has no pioasm/CMake
+   integration; programs must be embedded as pre-assembled 16-bit opcode
+   arrays by hand, same as the in-tree `ws2812_rpi_pico_pio.c` driver does).
+   Confirmed there's **no pure-Zephyr path for PIO**: `pio_rpi_pico` only
+   allocates state machines and hands back a raw `PIO` handle - loading the
+   program, configuring side-set/pins/clkdiv, and driving DMA into the TX
+   FIFO are all the same pico-sdk calls the bare-metal version uses. One
+   real gotcha hit and fixed: pico-sdk's `hardware/pio.h` `#define`s
+   `pio0`/`pio1` as its own singletons, which collides with Zephyr's
+   `DT_NODELABEL(pio0)` macro - fixed with `#undef pio0`/`#undef pio1`
+   right after including that header (see the comment in `main.c`).
+   Verified playing the same logarithmic sweep test tone as the bare-metal
+   I2S bring-up, audibly, on real Pico 1 (RP2040) hardware.
+
+Next: port `mod_player.c`/`mod_player.h` (pure C, no pico-sdk/Zephyr
+dependency already) and an embedded MOD file, replacing the sweep
+generator - the same last step the bare-metal version took.
 
 Build (Pico 2, non-W - the /w variant is currently broken, see hello_pico's
 README):

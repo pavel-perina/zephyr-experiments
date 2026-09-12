@@ -31,3 +31,13 @@
 &dma {
 	status = "okay";
 };
+
+/*
+ * No pinctrl group needed here: i2s_out_program_init()-equivalent code in
+ * main.c routes GP26/27/28 to the PIO block via raw pico_gpio_init() calls
+ * (same as the bare-metal version), bypassing Zephyr's pinctrl subsystem
+ * entirely for this peripheral.
+ */
+&pio0 {
+	status = "okay";
+};
