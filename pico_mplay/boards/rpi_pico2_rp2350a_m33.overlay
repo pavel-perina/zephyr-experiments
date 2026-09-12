@@ -1,0 +1,20 @@
+/*
+ * Neither rpi_pico nor rpi_pico2 define a `led0` alias in this Zephyr tree,
+ * so the standard samples/basic/blinky-style DT_ALIAS(led0) pattern needs
+ * this one-time overlay. GPIO25 is the onboard LED on the plain (non-W)
+ * Pico 2, same pin as the original Pico.
+ */
+#include <zephyr/dt-bindings/gpio/gpio.h>
+
+/ {
+	aliases {
+		led0 = &led0;
+	};
+
+	leds {
+		compatible = "gpio-leds";
+		led0: led_0 {
+			gpios = <&gpio0 25 GPIO_ACTIVE_HIGH>;
+		};
+	};
+};
