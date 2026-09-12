@@ -18,3 +18,16 @@
 		};
 	};
 };
+
+/*
+ * Both disabled by default; pinctrl (GPIO25 -> PWM slice 4 channel B) is
+ * already wired up at board level (pwm_ch4b_default), so enabling status is
+ * all that's needed here.
+ */
+&pwm {
+	status = "okay";
+};
+
+&dma {
+	status = "okay";
+};
