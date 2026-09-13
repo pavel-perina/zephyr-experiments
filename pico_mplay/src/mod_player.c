@@ -47,7 +47,28 @@ _Static_assert(sizeof(struct ModHeader) == 1084, "ModHeader must be 1084 bytes")
 #define DEFAULT_TEMPO    125
 #define MIN_PERIOD       56
 #define MAX_PERIOD       1712
-#define MIX_SCALE        32    // 8->16 bit output scale; lower = quieter overall (was 128)
+#define MIX_SCALE        64    // 8->16 bit output scale; lower = quieter overall (was 128)
+#define FILTER_CUTOFF_HZ 4500.0f   // Amiga-style low-pass cutoff, matches mplay-rs's DEFAULT_FILTER_HZ
+
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+
+// Fixed-point formats used in the per-sample render path (see render_tick()).
+// The RP2040 (Cortex-M0+) has no hardware FPU, so float math there is
+// software-emulated and far too slow for 4-channel/48kHz real-time mixing -
+// confirmed empirically (underruns climbed hard with a float version of this
+// same interpolation+filter code). Everything below is integer/shift-based
+// instead; only per-tick/per-note control-rate math (calc_increment(),
+// filter_alpha_fp(), vibrato, portamento, ...) stays float, since that runs
+// at most once per tick, not once per sample.
+#define POS_FRAC_BITS    15                    // channel position/increment: Q17.15
+#define POS_SCALE        (1u << POS_FRAC_BITS) // 17 integer bits covers the largest possible
+                                                // sample length (65535 length_words * 2 = 131070)
+#define FILTER_FRAC_BITS 8                     // filter state/input: Q(24).8
+#define FILTER_SCALE     (1 << FILTER_FRAC_BITS)
+#define ALPHA_FRAC_BITS  14                     // filter coefficient: Q0.14
+#define ALPHA_SCALE      (1 << ALPHA_FRAC_BITS)
 
 // Period table: 5 octaves (0-4), covering extended range used by many MODs
 static const uint16_t table_periods[5 * 12] = {
@@ -88,9 +109,22 @@ static int waveform_value(uint8_t waveform, uint8_t pos) {
     }
 }
 
-static float calc_increment(uint16_t period) {
-    if (period == 0) return 0.0f;
-    return AMIGA_PAL_CLOCK / ((float)period * 2.0f * OUTPUT_RATE);
+// Called at most once per tick (vibrato/portamento/arpeggio) or once per
+// note trigger, never per sample, so computing the ratio in float and only
+// converting the final result to fixed point is fine performance-wise.
+static uint32_t calc_increment(uint16_t period) {
+    if (period == 0) return 0;
+    float inc = AMIGA_PAL_CLOCK / ((float)period * 2.0f * OUTPUT_RATE);
+    return (uint32_t)(inc * (float)POS_SCALE + 0.5f);
+}
+
+// One-pole IIR coefficient: alpha = 2*pi*fc / (2*pi*fc + fs) - same formula
+// as mplay-rs's player.rs, so both ports emulate the Amiga's RC/LED output
+// filter identically. Called once at mod_player_init(), so float here is fine.
+static int32_t filter_alpha_fp(float cutoff_hz) {
+    float w = 2.0f * (float)M_PI * cutoff_hz;
+    float alpha = w / (w + (float)OUTPUT_RATE);
+    return (int32_t)(alpha * (float)ALPHA_SCALE + 0.5f);
 }
 
 static uint16_t period_add_semitones(uint16_t period, int semitones) {
@@ -204,6 +238,7 @@ int mod_player_init(struct PlayerState *ps, const uint8_t *mod_data, size_t mod_
     ps->mod_data = data;
     ps->mod_size = size;
     ps->header = hdr;
+    ps->filter_alpha = filter_alpha_fp(FILTER_CUTOFF_HZ);
     ps->speed = DEFAULT_SPEED;
     ps->tempo = DEFAULT_TEMPO;
     ps->break_row = -1;
@@ -310,7 +345,7 @@ static void trigger_note(struct PlayerState *ps, int ch, const struct ModNote *n
             c->target_period = apply_finetune(n->period, c->finetune);
         } else {
             c->period = apply_finetune(n->period, c->finetune);
-            c->position = 0.0f;
+            c->position = 0;
             c->increment = calc_increment(c->period);
             if (!(c->vibrato_waveform & 4)) c->vibrato_pos = 0;
             if (!(c->tremolo_waveform & 4)) c->tremolo_pos = 0;
@@ -357,7 +392,7 @@ static void process_row(struct PlayerState *ps, const struct ModNote notes[MOD_N
             if (c->offset_memory > 0 && c->sample_data) {
                 uint32_t off = (uint32_t)c->offset_memory * 256;
                 if (off < c->sample_length)
-                    c->position = (float)off;
+                    c->position = off << POS_FRAC_BITS;
             }
             break;
         case 0x0C: // Cxx: Set volume
@@ -499,7 +534,7 @@ static void process_tick(struct PlayerState *ps, const struct ModNote notes[MOD_
             switch (ext_cmd) {
             case 0x09: // E9y: Retrigger note
                 if (ext_arg > 0 && (ps->current_tick % ext_arg) == 0)
-                    c->position = 0.0f;
+                    c->position = 0;
                 break;
             case 0x0C: // ECy: Note cut
                 if (ps->current_tick == ext_arg)
@@ -522,42 +557,109 @@ static void process_tick(struct PlayerState *ps, const struct ModNote notes[MOD_
 
 static void render_tick(struct PlayerState *ps, int16_t *buffer, int num_samples) {
     for (int i = 0; i < num_samples; ++i) {
-        int32_t mix = 0;
+        int32_t mix = 0;   // sum of 4 channels' Q(24).8 filter_state
 
         for (int ch = 0; ch < NUM_CHANNELS; ++ch) {
             struct Channel *c = &ps->channels[ch];
+            int32_t input = 0;   // Q(24).8, matches filter_state's format
 
-            if (!c->sample_data || c->period == 0)
-                continue;
-
-            int pos = (int)c->position;
-
-            // Check bounds
-            if (c->loop_length > 2) {
-                uint32_t loop_end = c->loop_start + c->loop_length;
-                while (c->position >= (float)loop_end) {
-                    c->position -= (float)c->loop_length;
+            // Silent/inactive channels still feed 0 into the filter below
+            // instead of skipping it outright - letting filter_state decay
+            // smoothly avoids an audible click each time a channel starts or
+            // stops (same reasoning as mplay-rs's mix_sample()).
+            bool active = c->sample_data && c->period != 0;
+            if (active && c->loop_length > 2) {
+                // Computed fresh each sample rather than cached on the
+                // channel: it's just a shift+add (cheap even without an
+                // FPU), and only the multiply-heavy interpolation/filter
+                // math below needed precomputing to stay real-time.
+                uint32_t loop_end_fp = (c->loop_start + c->loop_length) << POS_FRAC_BITS;
+                uint32_t loop_length_fp = c->loop_length << POS_FRAC_BITS;
+                while (c->position >= loop_end_fp) {
+                    c->position -= loop_length_fp;
                 }
-                pos = (int)c->position;
-            } else {
-                if ((uint32_t)pos >= c->sample_length) {
-                    continue; // silence
-                }
+            } else if (active && (c->position >> POS_FRAC_BITS) >= c->sample_length) {
+                active = false; // past the end of a non-looping sample
             }
 
-            int vol = c->volume + c->tremolo_delta;
-            if (vol < 0) vol = 0;
-            if (vol > 64) vol = 64;
+            if (active) {
+                uint32_t pos = c->position >> POS_FRAC_BITS;
+                uint32_t frac = c->position & (POS_SCALE - 1);   // Q0.15, 0..32767
 
-            int8_t raw = c->sample_data[pos];
-            mix += (int32_t)raw * vol / 64;
+                int32_t s0 = c->sample_data[pos];
+                int32_t s1;
+                if (c->loop_length > 2 && pos + 1 >= c->loop_start + c->loop_length) {
+                    // Last byte of the loop: the neighbour is the loop start,
+                    // even when the loop ends before the sample data does -
+                    // reading the byte past the loop end there put a
+                    // periodic glitch on short chip loops
+                    s1 = c->sample_data[c->loop_start];
+                } else if (pos + 1 < c->sample_length) {
+                    s1 = c->sample_data[pos + 1];
+                } else {
+                    s1 = s0; // last sample of a non-looping voice: hold, don't extrapolate
+                }
 
-            c->position += c->increment;
+                int vol = c->volume + c->tremolo_delta;
+                if (vol < 0) vol = 0;
+                if (vol > 64) vol = 64;
+
+                // Linear interpolation between adjacent samples (plain
+                // integers, still in the -128..127 sample range), volume
+                // applied before the filter (matches real Paula behaviour:
+                // volume is set in hardware, then the RC/LED filter smooths
+                // the result - so volume changes don't step the output).
+                //
+                // vol's divide-by-64 and the shift into Q(24).8 are combined
+                // into one left shift (64 = 2^6, so /64 then <<8 is exactly
+                // <<2) rather than computed as separate operations: dividing
+                // first would truncate interp*vol to a handful of levels at
+                // low volume (e.g. vol=1 collapses interp's whole -128..127
+                // range down to about -2..1) before the shift ever ran,
+                // destroying real signal precisely during quiet fade-ins -
+                // the same bug independently found in ~/devel/mplay's
+                // render_tick() (mix += raw*vol/64, divided per-channel
+                // before summing). Scaling up never discards bits, so
+                // computing it this way is exactly the true interp*vol/64
+                // value scaled into Q8, not an approximation of it. Written
+                // as a multiply, not a shift: left-shifting a negative value
+                // is undefined behaviour in C11 (same instruction on ARM).
+                int32_t interp = s0 + (((int32_t)frac * (s1 - s0)) >> POS_FRAC_BITS);
+                input = (interp * vol) * (FILTER_SCALE / 64);
+                c->position += c->increment;
+            }
+
+            // One-pole low-pass filter, per channel (not on the final mix):
+            // necessary rather than stylistic, since a future per-channel
+            // E0y LED-filter toggle would give channels different cutoffs,
+            // and a linear filter only commutes with summation when every
+            // input shares the same coefficient. alpha (Q0.14) * a Q(24).8
+            // delta fits comfortably in int32 - see the fixed-point format
+            // comment near POS_FRAC_BITS for the range check.
+            // Round the step to nearest: a bare >> floors, which for negative
+            // deltas biases every step downward (a small DC offset, and the
+            // reason the limit cycle below only ever stuck on the negative side).
+            int32_t delta = input - c->filter_state;
+            c->filter_state += (ps->filter_alpha * delta + (1 << (ALPHA_FRAC_BITS - 1))) >> ALPHA_FRAC_BITS;
+            // A fixed-point one-pole filter can settle into a permanent
+            // nonzero "limit cycle" instead of ever reaching exact silence:
+            // once the decay step (alpha*delta >> ALPHA_FRAC_BITS) rounds to
+            // zero before filter_state itself reaches zero, it gets stuck
+            // there forever (with rounding: at +-1, since alpha < 0.5) -
+            // confirmed empirically as a constant -1 LSB DC floor during
+            // quiet passages (tools/mod_to_wav.c A/B render).
+            // Snapping small residuals to exact zero when the true target is
+            // silence (input==0) fixes it without affecting real low-level
+            // audio content, which never has input pinned at exactly 0.
+            if (input == 0 && c->filter_state > -8 && c->filter_state < 8)
+                c->filter_state = 0;
+            mix += c->filter_state;
         }
 
-        // Scale 8-bit to 16-bit; up to 4 channels can still sum past full
-        // scale on loud passages, which is what the clamp below is for.
-        int32_t out = mix * MIX_SCALE;
+        // Scale 8-bit to 16-bit (plus undo the Q.8 filter scaling); up to 4
+        // channels can still sum past full scale on loud passages, which is
+        // what the clamp below is for.
+        int32_t out = (mix * MIX_SCALE) >> FILTER_FRAC_BITS;
         if (out > 32767) out = 32767;
         if (out < -32768) out = -32768;
         buffer[i] = (int16_t)out;
@@ -620,9 +722,28 @@ static void restart_song(struct PlayerState *ps) {
     ps->current_position = 0;
     ps->current_row = 0;
     ps->loop_count = 0;
+    // The desktop version's main() exits once it detects the song looping,
+    // so it never had to handle this. Embedded playback runs forever, so
+    // this restart is a real recurring event: without resetting speed/tempo,
+    // any Fxx effect encountered mid-song (and never reset by a later Fxx
+    // before the loop) would carry over into every subsequent pass, playing
+    // faster/slower than the song was authored for.
+    ps->speed = DEFAULT_SPEED;
+    ps->tempo = DEFAULT_TEMPO;
+    // Full channel reinit, not just left alone for row 0 to re-trigger:
+    // a channel that doesn't happen to get a fresh note on row 0 would
+    // otherwise carry every bit of its old state into the new pass -
+    // volume, vibrato/tremolo phase, portamento target, and critically
+    // filter_state (the low-pass filter's decay tail). A channel that was
+    // loud right when this restart fires would keep ringing into whatever
+    // section follows the loop, which can land in a quiet part of the song
+    // and sound like unexplained noise with no apparent source. This only
+    // affects this synthetic "no explicit loop found" restart - real
+    // in-song loop/jump effects (Bxx/Dxx/E6y) go through break_position/
+    // break_row directly, never call restart_song(), and correctly keep
+    // channel state exactly like a real tracker would.
+    memset(ps->channels, 0, sizeof(ps->channels));
     memset(ps->visited, 0, sizeof(ps->visited));
-    // Channel state (sample positions, volume, etc.) intentionally left
-    // alone - row 0's notes will re-trigger whichever channels have one.
     enter_row(ps);
 }
 

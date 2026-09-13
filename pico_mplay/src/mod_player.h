@@ -42,8 +42,13 @@ struct Channel {
     uint32_t sample_length;
     uint32_t loop_start;
     uint32_t loop_length;
-    float position;
-    float increment;
+    // position/increment are Q17.15 fixed point (see POS_FRAC_BITS in
+    // mod_player.c), not float - the RP2040 (Cortex-M0+) has no hardware
+    // FPU, and this pair sits in the hottest loop in the program (every
+    // output sample, every channel). Integer/fixed-point math there is
+    // what keeps real-time playback glitch-free on that chip.
+    uint32_t position;
+    uint32_t increment;
     uint16_t period;
     uint8_t volume;
     uint8_t instrument;
@@ -60,6 +65,9 @@ struct Channel {
     int8_t tremolo_delta;
     int8_t finetune;
     uint8_t offset_memory;
+    // One-pole low-pass filter state (Amiga RC/LED filter emulation),
+    // Q(24).8 fixed point - same "no FPU on RP2040" reasoning as position.
+    int32_t filter_state;
 };
 
 struct PlayerState {
@@ -78,6 +86,8 @@ struct PlayerState {
     uint32_t sample_loop_start[MOD_MAX_SAMPLES];
     uint32_t sample_loop_length[MOD_MAX_SAMPLES];
     int8_t sample_finetune[MOD_MAX_SAMPLES];
+
+    int32_t filter_alpha; // one-pole low-pass coefficient, Q0.14 fixed point, set once in mod_player_init()
 
     int speed;
     int tempo;
