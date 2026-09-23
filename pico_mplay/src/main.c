@@ -18,6 +18,16 @@
  * manually re-armed from its own completion callback via zephyr/drivers/dma.h,
  * writing 32-bit stereo frames directly into the PIO's TX FIFO register.
  *
+ * dma_done() (the DMA completion ISR) only re-arms DMA and does bookkeeping
+ * (consumed/filled sequence counters, an underrun count, and the PIO's own
+ * TXSTALL flag) - it does not render. Rendering (fill_buffer(), i.e. the
+ * whole 4-channel mixer) runs in main()'s thread, woken by a semaphore the
+ * ISR gives, so a slow render can't block other same/lower-priority
+ * interrupts (e.g. USB CDC) for the whole mixer's runtime. See the
+ * consumed/filled comment near their declarations for why a single flag
+ * isn't enough, and ~/devel/pico_dma/pico_mplay.c for the bare-metal
+ * version of the same scheme this was ported from.
+ *
  * pio_gpio_init()/pio_sm_set_consecutive_pindirs() (raw pico-sdk calls, same
  * as the bare-metal version) handle routing GP26/27/28 to the PIO block
  * directly - no Zephyr pinctrl devicetree group needed for this peripheral.
@@ -29,6 +39,7 @@
 #include <zephyr/kernel.h>
 #include <zephyr/device.h>
 #include <zephyr/drivers/dma.h>
+#include <zephyr/sys/barrier.h>
 #include <zephyr/drivers/misc/pio_rpi_pico/pio_rpi_pico.h>
 #if defined(CONFIG_SOC_SERIES_RP2350)
 #include <zephyr/dt-bindings/dma/rpi-pico-dma-rp2350.h>
@@ -66,7 +77,35 @@ static uint32_t dma_channel;
 static volatile uint32_t *txf;
 
 static uint32_t buf[2][BUF_LEN];
-static int playing;
+
+/* Buffers are numbered by sequence: buffer k lives in buf[k & 1]. The DMA
+ * ISR (dma_done()) advances `consumed` (buffers DMA has finished) and
+ * re-arms the next one immediately; the main thread advances `filled`
+ * (buffers completely rendered) only *after* rendering, so comparing the
+ * two counters catches every underrun - including DMA reaching a buffer
+ * the main thread is still mid-render on. Mirrors the bare-metal version's
+ * consumed/filled scheme in ~/devel/pico_dma/pico_mplay.c, and for the same
+ * reason: a single "fill_needed" flag cleared before rendering starts can
+ * miss/lose events across the ISR/thread boundary.
+ *
+ * Unlike bare-metal, rendering used to happen directly inside dma_done()
+ * itself (the DMA completion ISR) - the entire 4-channel mixer ran with
+ * this interrupt's priority blocked for however long mod_player_produce()
+ * took, every 5.33ms. That's moved to the main thread below so a slow
+ * render can't stall other interrupts (USB CDC console included).
+ */
+static volatile uint32_t consumed;   /* ISR-owned */
+static volatile uint32_t filled;     /* main-thread-owned */
+static volatile uint32_t underrun_count;
+
+/* Hardware's own "FIFO ran dry" flag (PIO's sticky per-SM TXSTALL bit),
+ * independent of the consumed/filled bookkeeping above - catches cases the
+ * software counters can't, such as the main thread being descheduled
+ * entirely rather than merely running behind.
+ */
+static volatile uint32_t txstall_count;
+
+K_SEM_DEFINE(fill_needed_sem, 0, 1);
 
 static struct PlayerState player;
 static int16_t mono_scratch[BUF_LEN];
@@ -85,11 +124,12 @@ static void fill_buffer(uint32_t *b)
 }
 
 /* Fires once DMA finishes streaming one of the two buffers. Immediately
- * hands the *other* buffer (already filled last time round) back to DMA to
- * keep the gap minimal, then refills the buffer that just finished playing
- * for next time - the same ping-pong pattern as the bare-metal version,
- * just driven through Zephyr's dma_reload()/dma_start() instead of a raw
- * pico-sdk DMA retrigger.
+ * hands the next buffer (already rendered last time round) back to DMA to
+ * keep the gap minimal, bumps the sequence counters, and wakes the main
+ * thread to render the buffer that just finished playing - it does *not*
+ * render here itself (see the consumed/filled comment above for why).
+ * Same driver calls as before (dma_reload()/dma_start()), just no longer
+ * doing the mixer's work on the way out.
  */
 static void dma_done(const struct device *dev, void *user_data, uint32_t channel, int status)
 {
@@ -100,13 +140,28 @@ static void dma_done(const struct device *dev, void *user_data, uint32_t channel
 		return;
 	}
 
-	int next = 1 - playing;
-	dma_reload(dma_dev, dma_channel, (uintptr_t)buf[next], (uintptr_t)txf,
+	uint32_t next = consumed + 1;   /* sequence number of the buffer to play now */
+
+	dma_reload(dma_dev, dma_channel, (uintptr_t)buf[next & 1], (uintptr_t)txf,
 		   BUF_LEN * sizeof(uint32_t));
 	dma_start(dma_dev, dma_channel);
-	playing = next;
 
-	fill_buffer(buf[1 - next]);
+	/* `next` must be completely rendered by now (filled > next). If the
+	 * main thread hasn't finished it - or hasn't started - DMA is about
+	 * to play stale data.
+	 */
+	if ((int32_t)(filled - next) <= 0) {   /* signed diff: wrap-safe */
+		underrun_count++;
+	}
+	consumed = next;
+
+	uint32_t stall_bit = 1u << (PIO_FDEBUG_TXSTALL_LSB + sm);
+	if (pio->fdebug & stall_bit) {
+		txstall_count++;
+		pio->fdebug = stall_bit;   /* write-1-to-clear */
+	}
+
+	k_sem_give(&fill_needed_sem);
 }
 
 int main(void)
@@ -178,7 +233,7 @@ int main(void)
 	 */
 	fill_buffer(buf[0]);
 	fill_buffer(buf[1]);
-	playing = 0;
+	filled = 2;
 	txf = &pio->txf[sm];
 
 	int ch = dma_request_channel(dma_dev, NULL);
@@ -222,15 +277,44 @@ int main(void)
 	 */
 	pio_sm_set_enabled(pio, sm, true);
 	dma_start(dma_dev, dma_channel);
+	/* The SM was enabled before the first transfer started, so it stalls
+	 * once waiting for it - clear that expected startup stall before
+	 * txstall_count starts meaning "FIFO ran dry during playback".
+	 */
+	pio->fdebug = 1u << (PIO_FDEBUG_TXSTALL_LSB + sm);
 
 	printk("mod player running\n");
+	int64_t next_report = k_uptime_get() + 1000;
 	while (1) {
-		/* Software-only sanity check, same as bare-metal: position/row
-		 * should visibly advance through the song regardless of
-		 * whether anything is audible.
+		/* Woken by dma_done() (or times out - not otherwise fatal) so
+		 * the report below still fires ~1/s even if nothing is due
+		 * to render this tick.
 		 */
-		printk("pos=%d row=%d\n", player.current_position, player.current_row);
-		k_msleep(1000);
+		k_sem_take(&fill_needed_sem, K_MSEC(100));
+
+		/* Buffer `filled` may be rendered once buffer `filled - 2`
+		 * (same slot) has been consumed, i.e. filled < consumed + 2.
+		 */
+		while ((int32_t)(consumed + 2 - filled) > 0) {
+			fill_buffer(buf[filled & 1]);
+			barrier_dmem_fence_full();   /* buffer stores land before the count says "done" */
+			filled++;
+		}
+
+		/* Software-only sanity check, same as bare-metal: position/
+		 * row should visibly advance through the song regardless of
+		 * whether anything is audible, plus both underrun indicators
+		 * (software: render ran late; hardware: FIFO actually ran
+		 * dry) so a symptom like an occasional pop can be attributed
+		 * to this DMA/render path or ruled out in favour of something
+		 * else (e.g. a power-supply issue affecting the amp/DAC).
+		 */
+		if (k_uptime_get() >= next_report) {
+			printk("pos=%d row=%d underruns=%u txstall=%u\n",
+			       player.current_position, player.current_row,
+			       underrun_count, txstall_count);
+			next_report += 1000;
+		}
 	}
 	return 0;
 }
