@@ -7,7 +7,11 @@
 #include <zephyr/dt-bindings/gpio/gpio.h>
 
 / {
-	aliases {
+    chosen {
+        zephyr,console = &usb_cdc;
+    };
+
+    aliases {
 		led0 = &led0;
 	};
 
@@ -40,4 +44,10 @@
  */
 &pio0 {
 	status = "okay";
+};
+
+&zephyr_udc0 {
+    usb_cdc: usb_cdc_0 {
+        compatible = "zephyr,cdc-acm-uart";
+    };
 };

@@ -157,7 +157,22 @@ static void dma_done(const struct device *dev, void *user_data, uint32_t channel
 
 	uint32_t stall_bit = 1u << (PIO_FDEBUG_TXSTALL_LSB + sm);
 	if (pio->fdebug & stall_bit) {
-		txstall_count++;
+		/* The very first call is special: pio_sm_set_enabled() runs
+		 * before dma_start()'s first bus transfer has necessarily
+		 * landed in the FIFO, so the SM always stalls briefly at
+		 * boot waiting for that first word - not a real underrun.
+		 * By the time a whole buffer's worth of playback has elapsed
+		 * (i.e. we're here at all), that transient is long over, so
+		 * checking here instead of right after the initial
+		 * dma_start() in main() is race-free: clear and don't count
+		 * once, then count for real from then on.
+		 */
+		static bool first_call = true;
+
+		if (!first_call) {
+			txstall_count++;
+		}
+		first_call = false;
 		pio->fdebug = stall_bit;   /* write-1-to-clear */
 	}
 
@@ -277,11 +292,12 @@ int main(void)
 	 */
 	pio_sm_set_enabled(pio, sm, true);
 	dma_start(dma_dev, dma_channel);
-	/* The SM was enabled before the first transfer started, so it stalls
-	 * once waiting for it - clear that expected startup stall before
-	 * txstall_count starts meaning "FIFO ran dry during playback".
+	/* The SM stalls once at boot, waiting for the first buffer's data to
+	 * actually land in the FIFO (dma_start() only arms the transfer, the
+	 * bus transaction itself is asynchronous) - that expected transient
+	 * is absorbed race-free inside dma_done()'s first call instead of
+	 * being cleared here, see the comment there.
 	 */
-	pio->fdebug = 1u << (PIO_FDEBUG_TXSTALL_LSB + sm);
 
 	printk("mod player running\n");
 	int64_t next_report = k_uptime_get() + 1000;
