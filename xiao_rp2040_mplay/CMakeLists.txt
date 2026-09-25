@@ -1,5 +1,14 @@
 cmake_minimum_required(VERSION 3.20.0)
 
+# Provides the SSD1306 OLED (with the exact init parameters this specific
+# panel needs - segment-remap/com-invdir/multiplex-ratio etc, easy to get
+# wrong by hand) and the D1 button as a proper gpio-keys node. Set here
+# (before find_package) so plain `west build` picks it up with no extra
+# flag needed, same reasoning as the self-contained CDC-ACM console setup.
+# Does not cover the buzzer - that pinctrl/PWM setup stays in
+# boards/xiao_rp2040.overlay, since the shield doesn't know about it.
+set(SHIELD seeed_xiao_expansion_board)
+
 find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
 project(xiao_rp2040_mplay)
 
