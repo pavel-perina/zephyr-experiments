@@ -1,3 +1,4 @@
+#include <errno.h>
 #include <zephyr/device.h>
 #include <zephyr/drivers/display.h>
 
@@ -54,10 +55,10 @@ int oled_display_init(void)
  * render thread win whenever it has work, regardless of how long this
  * thread blocks. So this pushes the whole frame in one call again.
  */
-void oled_draw_bars(const uint8_t *heights, int n_bars, uint8_t max_height)
+int oled_draw_bars(const uint8_t *heights, int n_bars, uint8_t max_height)
 {
 	if (!disp_dev) {
-		return;
+		return -ENODEV;
 	}
 
 	for (size_t i = 0; i < sizeof(frame); i++) {
@@ -94,5 +95,5 @@ void oled_draw_bars(const uint8_t *heights, int n_bars, uint8_t max_height)
 		}
 	}
 
-	push_frame();
+	return push_frame();
 }

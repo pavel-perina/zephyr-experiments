@@ -27,6 +27,7 @@
 #include <zephyr/device.h>
 #include <zephyr/drivers/pwm.h>
 #include <zephyr/drivers/dma.h>
+#include <zephyr/drivers/gpio.h>
 #include <zephyr/sys/barrier.h>
 #if defined(CONFIG_SOC_SERIES_RP2350)
 #include <zephyr/dt-bindings/dma/rpi-pico-dma-rp2350.h>
@@ -34,12 +35,14 @@
 #include <zephyr/dt-bindings/dma/rpi-pico-dma-rp2040.h>
 #endif
 #include <hardware/structs/pwm.h>
+#include <hardware/structs/dma.h>
 
 #include "mod_player.h"
 #include "mod_data.h"
 #include "vu_neopixel.h"
 #include "oled_display.h"
 #include "spectrum.h"
+#include "diag.h"
 
 /* A3/D3 = GPIO29 = PWM slice 6, channel B (slice = (gpio>>1)&7, channel =
  * gpio&1). Zephyr's PWM "channel" numbering is slice*2 + (0=A, 1=B).
@@ -66,6 +69,18 @@ static uint16_t buf[2][BUF_LEN];
 static volatile uint32_t consumed;
 static volatile uint32_t filled;
 static volatile uint32_t underrun_count;
+/* Diagnostics for the "audio + spectrum freeze, console keeps printing"
+ * hang: dma_done() used to return silently on an error status, never
+ * re-arming, which would freeze consumed (and so both audio and the
+ * spectrum ring buffer) while main() kept printing stale pos/row.
+ */
+static volatile uint32_t dma_error_count;
+static volatile int dma_last_error;
+static volatile uint32_t dma_irq_count;
+/* Spectrum thread heartbeat + display_write() health. */
+static volatile uint32_t spectrum_loops;
+static volatile uint32_t oled_errors;
+static volatile int oled_last_error;
 
 K_SEM_DEFINE(fill_needed_sem, 0, 1);
 
@@ -132,8 +147,13 @@ static void dma_done(const struct device *dev, void *user_data, uint32_t channel
 	ARG_UNUSED(dev);
 	ARG_UNUSED(user_data);
 	ARG_UNUSED(channel);
+	dma_irq_count++;
 	if (status < 0) {
-		return;
+		/* Count it but keep going - returning here without re-arming
+		 * kills audio permanently.
+		 */
+		dma_error_count++;
+		dma_last_error = status;
 	}
 
 	uint32_t next = consumed + 1;
@@ -176,7 +196,13 @@ static void spectrum_thread(void *p1, void *p2, void *p3)
 		uint8_t bar_heights[SPECTRUM_BANDS];
 
 		spectrum_get_levels(bar_heights, SPECTRUM_BAR_MAX);
-		oled_draw_bars(bar_heights, SPECTRUM_BANDS, SPECTRUM_BAR_MAX);
+		int ret = oled_draw_bars(bar_heights, SPECTRUM_BANDS, SPECTRUM_BAR_MAX);
+
+		if (ret != 0) {
+			oled_errors++;
+			oled_last_error = ret;
+		}
+		spectrum_loops++;
 
 		k_msleep(40);
 	}
@@ -193,11 +219,40 @@ static void spectrum_thread(void *p1, void *p2, void *p3)
  * next to this thread's stack, consistent with a hang with no crash
  * message and an unrelated subsystem (audio) freezing shortly after.
  */
-K_THREAD_DEFINE(spectrum_tid, 4096, spectrum_thread, NULL, NULL, NULL,
-		 K_LOWEST_APPLICATION_THREAD_PRIO, 0, 0);
+/* Created suspended (K_TICKS_FOREVER) and started from main() only after
+ * oled_display_init(): otherwise this thread runs as soon as main() blocks
+ * on the init blank's I2C write and pushes a frame concurrently with it,
+ * interleaving two SSD1306 command/data sequences.
+ */
+K_THREAD_DEFINE(spectrum_tid, 4096 + 256, spectrum_thread, NULL, NULL, NULL,
+		 K_LOWEST_APPLICATION_THREAD_PRIO, 0, K_TICKS_FOREVER);
+
+/* The XIAO's RGB user LED (led0/1/2 = blue GPIO25, green GPIO16, red
+ * GPIO17, all active-low). Left unconfigured, those pins come up as inputs
+ * with the RP2040's default pull-down, which sinks enough current through
+ * the LEDs to light them - drive them to their inactive (high) level
+ * instead.
+ */
+static void user_leds_off(void)
+{
+	const struct gpio_dt_spec leds[] = {
+		GPIO_DT_SPEC_GET(DT_ALIAS(led0), gpios),
+		GPIO_DT_SPEC_GET(DT_ALIAS(led1), gpios),
+		GPIO_DT_SPEC_GET(DT_ALIAS(led2), gpios),
+	};
+
+	for (size_t i = 0; i < ARRAY_SIZE(leds); i++) {
+		if (gpio_is_ready_dt(&leds[i])) {
+			gpio_pin_configure_dt(&leds[i], GPIO_OUTPUT_INACTIVE);
+		}
+	}
+}
 
 int main(void)
 {
+	user_leds_off();
+	diag_init();
+
 	pwm_dev = DEVICE_DT_GET(DT_NODELABEL(pwm));
 	dma_dev = DEVICE_DT_GET(DT_NODELABEL(dma));
 
@@ -236,6 +291,7 @@ int main(void)
 	if (oled_display_init() != 0) {
 		printk("OLED not ready or failed to blank\n");
 	}
+	k_thread_start(spectrum_tid);
 
 	fill_buffer(buf[0]);
 	fill_buffer(buf[1]);
@@ -273,6 +329,7 @@ int main(void)
 
 	printk("mod player running (buzzer/PWM)\n");
 	int64_t next_report = k_uptime_get() + 1000;
+	uint32_t last_irq_count = 0;
 
 	while (1) {
 		/* Woken by dma_done() (or times out - not otherwise fatal) so
@@ -280,6 +337,7 @@ int main(void)
 		 * to render this tick.
 		 */
 		k_sem_take(&fill_needed_sem, K_MSEC(100));
+		diag_feed();
 
 		while ((int32_t)(consumed + 2 - filled) > 0) {
 			fill_buffer(buf[filled & 1]);
@@ -292,9 +350,27 @@ int main(void)
 		 * is audible, plus the underrun count.
 		 */
 		if (k_uptime_get() >= next_report) {
-			printk("pos=%d row=%d underruns=%u\n",
+			printk("pos=%d row=%d underruns=%u dma_irqs=%u dma_errs=%u(%d) "
+			       "spec_loops=%u oled_errs=%u(%d)\n",
 			       player.current_position, player.current_row,
-			       underrun_count);
+			       underrun_count, dma_irq_count, dma_error_count,
+			       dma_last_error, spectrum_loops, oled_errors,
+			       oled_last_error);
+			if (dma_irq_count == last_irq_count) {
+				/* DMA chain stalled - dump raw state. CTRL bit 24 =
+				 * BUSY, bit 0 = EN, bits 29..31 = READ/WRITE/AHB error.
+				 * PWM CSR bit 0 = slice enabled.
+				 */
+				printk("  STALL: ctrl=%08x count=%u read=%08x "
+				       "inte0=%08x intr=%08x pwm_csr=%08x pwm_ctr=%u\n",
+				       dma_hw->ch[dma_channel].al1_ctrl,
+				       dma_hw->ch[dma_channel].transfer_count,
+				       dma_hw->ch[dma_channel].read_addr,
+				       dma_hw->inte0, dma_hw->intr,
+				       pwm_hw->slice[PWM_SLICE].csr,
+				       pwm_hw->slice[PWM_SLICE].ctr);
+			}
+			last_irq_count = dma_irq_count;
 			next_report += 1000;
 		}
 	}

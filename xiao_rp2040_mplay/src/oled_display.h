@@ -19,6 +19,7 @@ int oled_display_init(void);
  * call from spectrum_process()'s own thread, not the render thread (see
  * main.c and the .c file for why that's safe without page-chunking).
  */
-void oled_draw_bars(const uint8_t *heights, int n_bars, uint8_t max_height);
+/* Returns display_write()'s result (0 on success, -ENODEV if no display). */
+int oled_draw_bars(const uint8_t *heights, int n_bars, uint8_t max_height);
 
 #endif
