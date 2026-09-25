@@ -1,4 +1,5 @@
 build/
 .vscode/
 *.uf2
+xiao_rp2040_mplay/tools/.venv
 

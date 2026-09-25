@@ -4,8 +4,21 @@
 #include <zephyr/drivers/led_strip.h>
 
 #include "vu_neopixel.h"
+#include "color_luts.h"
 
 static const struct device *strip_dev;
+
+/* The generated LUT (tools/color_gradient.py) is full-fidelity/vivid - the
+ * green/red visual-brightness imbalance and any hue correction already
+ * live in the OKLCH interpolation that built it, not here. This is purely
+ * "how much current the NeoPixel draws" control: reported as making
+ * playback less stable at higher levels (plausibly the LED's own current
+ * draw sagging the supply enough to disturb the MCU) and "really
+ * blinding" at close range regardless. A uniform per-channel cap scales
+ * the LUT's output down without shifting hue or the relative ratios
+ * between channels, unlike clamping each channel independently would.
+ */
+#define MAX_CHANNEL 16
 
 /* Real VU meters are RMS-based (averaging/ballistic), not peak - a "PPM
  * peak meter" is the other, faster-reacting kind. Peak-per-buffer pinned
@@ -15,7 +28,15 @@ static const struct device *strip_dev;
  * few dB to several dB of crest factor), so it naturally spends less time
  * pinned and reads closer to perceived loudness.
  */
-#define MAX_BRIGHTNESS 160   /* out of 255 - full white LED at 5cm is a lot */
+
+/* Checked empirically (tools/mod_to_wav-style host harness) against
+ * AXEL_F.MOD: the RMS envelope never exceeds ~33% even at the song's
+ * loudest moments - MIX_SCALE keeps real headroom for the I2S DAC/amp
+ * chain (see pico_dma/README.md), so 0..1 raw was never reachable. This
+ * rescales so the loudest realistic content actually reaches the top of
+ * the LUT (red) instead of topping out a third of the way through it.
+ */
+#define LEVEL_GAIN 3.0f
 
 /* VU-style ballistics: attack (level rising) is fast so the LED tracks
  * transients, decay (level falling) is slow so it reads like a needle
@@ -38,29 +59,22 @@ int vu_neopixel_init(void)
 	return 0;
 }
 
-/* Green -> yellow -> red by level, single pixel standing in for a full VU
- * bar graph's colour range. Breakpoints are arbitrary/by-eye, not measured
- * against anything - easy to retune once it's actually visible.
- */
 static struct led_rgb colour_for(float level)
 {
-	struct led_rgb c = {0};
-	float b = MAX_BRIGHTNESS;
+	int idx = (int)(level * (COLOR_LUT_SIZE - 1));
 
-	if (level < 0.5f) {
-		c.g = (uint8_t)(b * (level / 0.5f));
-	} else if (level < 0.8f) {
-		c.g = (uint8_t)b;
-		c.r = (uint8_t)(b * ((level - 0.5f) / 0.3f));
-	} else {
-		c.r = (uint8_t)b;
-		float t = (level - 0.8f) / 0.2f;
-
-		if (t > 1.0f) {
-			t = 1.0f;
-		}
-		c.g = (uint8_t)(b * (1.0f - t));
+	if (idx < 0) {
+		idx = 0;
+	} else if (idx >= COLOR_LUT_SIZE) {
+		idx = COLOR_LUT_SIZE - 1;
 	}
+
+	const uint8_t *rgb = blue_pink_white_lut[idx];
+	struct led_rgb c = {
+		.r = (uint8_t)((uint32_t)rgb[0] * MAX_CHANNEL / 255),
+		.g = (uint8_t)((uint32_t)rgb[1] * MAX_CHANNEL / 255),
+		.b = (uint8_t)((uint32_t)rgb[2] * MAX_CHANNEL / 255),
+	};
 	return c;
 }
 
@@ -79,7 +93,11 @@ void vu_neopixel_update(const int16_t *samples, size_t n)
 	}
 
 	float rms = sqrtf((float)sum_sq / (float)n);
-	float level = rms / 32768.0f;
+	float level = (rms / 32768.0f) * LEVEL_GAIN;
+
+	if (level > 1.0f) {
+		level = 1.0f;
+	}
 	float alpha = (level > envelope) ? ATTACK_ALPHA : DECAY_ALPHA;
 
 	envelope += alpha * (level - envelope);
