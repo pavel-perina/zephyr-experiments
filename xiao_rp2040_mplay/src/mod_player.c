@@ -719,6 +719,7 @@ static void enter_row(struct PlayerState *ps) {
 }
 
 static void restart_song(struct PlayerState *ps) {
+    ps->restarts++;
     ps->current_position = 0;
     ps->current_row = 0;
     ps->loop_count = 0;

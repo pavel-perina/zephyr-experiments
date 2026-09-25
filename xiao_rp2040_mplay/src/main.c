@@ -401,6 +401,14 @@ int main(void)
 		k_sem_take(&fill_needed_sem, K_MSEC(100));
 		diag_feed();
 
+		/* Song ended (the player looped it back to the start):
+		 * advance like a button press. A few ms of the restart may
+		 * already be in the queued buffers - inaudible in practice.
+		 */
+		if (player.restarts > 0) {
+			atomic_set(&next_song_requested, 1);
+		}
+
 		if (atomic_clear(&next_song_requested)) {
 			/* The two buffers already queued still play out the
 			 * old song (~10ms) - not worth flushing.

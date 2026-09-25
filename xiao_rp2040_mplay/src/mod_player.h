@@ -109,6 +109,10 @@ struct PlayerState {
     int samples_per_tick;
     int tick_samples_remaining;
     bool started;
+    // Incremented each time the song ends and restart_song() loops it back
+    // to the start (end of the order list, or a jump back to a row already
+    // played) - lets a playlist caller advance instead of looping forever.
+    uint32_t restarts;
     bool visited[128 * MOD_ROWS_PER_PATTERN];
 };
 
