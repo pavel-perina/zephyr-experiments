@@ -55,7 +55,17 @@ int oled_display_init(void)
  * render thread win whenever it has work, regardless of how long this
  * thread blocks. So this pushes the whole frame in one call again.
  */
-int oled_draw_bars(const uint8_t *heights, int n_bars, uint8_t max_height)
+static void set_pixel_row(int y, int x0, int x_end)
+{
+	int page = y >> 3;
+	uint8_t bit = 1u << (y & 7);
+
+	for (int x = x0; x < x_end; x++) {
+		frame[page * OLED_WIDTH + x] |= bit;
+	}
+}
+
+int oled_draw_bars(const uint8_t *heights, const uint8_t *peaks, int n_bars, uint8_t max_height)
 {
 	if (!disp_dev) {
 		return -ENODEV;
@@ -86,12 +96,23 @@ int oled_draw_bars(const uint8_t *heights, int n_bars, uint8_t max_height)
 		}
 
 		for (int y = OLED_HEIGHT - h; y < OLED_HEIGHT; y++) {
-			int page = y >> 3;
-			uint8_t bit = 1u << (y & 7);
+			set_pixel_row(y, x0, x_end);
+		}
 
-			for (int x = x0; x < x_end; x++) {
-				frame[page * OLED_WIDTH + x] |= bit;
+		/* Peak dot: a one-pixel line at the peak height - only visible
+		 * once it's above the bar (at the bar's own height it's just
+		 * the bar's top row).
+		 */
+		if (peaks && peaks[b] > 0) {
+			uint8_t p = peaks[b];
+
+			if (p > max_height) {
+				p = max_height;
 			}
+			if (p > OLED_HEIGHT) {
+				p = OLED_HEIGHT;
+			}
+			set_pixel_row(OLED_HEIGHT - p, x0, x_end);
 		}
 	}
 

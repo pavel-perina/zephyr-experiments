@@ -1,5 +1,11 @@
+#include <string.h>
+
 #include "spectrum.h"
 #include "fft_coeffs.h"
+
+_Static_assert(FFT_BANDS == SPECTRUM_BANDS, "regenerate fft_coeffs.h: --bands must match SPECTRUM_BANDS");
+_Static_assert(FFT_WIDE_BANDS == SPECTRUM_WIDE_BANDS,
+	       "regenerate fft_coeffs.h: --wide-bands must match SPECTRUM_WIDE_BANDS");
 
 /* 512-point version of the earlier 64-point-every-buffer FFT (see git
  * history for that one, and the 16-band IIR bank before it). A bigger FFT
@@ -40,7 +46,19 @@ static size_t ring_pos;
 static int16_t fft_re[FFT_N];
 static int16_t fft_im[FFT_N];
 
-static int32_t envelope[SPECTRUM_BANDS];
+static int32_t envelope[SPECTRUM_BANDS];   /* sized for the larger (fine) layout */
+
+/* Requested mode (settable from any thread, see spectrum_set_mode()) vs the
+ * one envelope[] currently holds - spectrum_process() resets the envelopes
+ * on a switch, since the two layouts' bands don't correspond.
+ */
+static volatile enum spectrum_mode requested_mode = SPECTRUM_DEFAULT_MODE;
+static enum spectrum_mode active_mode = SPECTRUM_DEFAULT_MODE;
+
+/* Wide mode's falling peak dots, Q8.8 pixels (so they can fall by
+ * fractions of a pixel per frame).
+ */
+static int32_t peak_q8[SPECTRUM_WIDE_BANDS];
 
 /* These were tuned for the old cadence - envelope smoothed once per audio
  * buffer, ~188Hz (5.33ms/step) - and left unchanged when spectrum_process()
@@ -64,6 +82,35 @@ static int32_t envelope[SPECTRUM_BANDS];
  * of the time.
  */
 #define ENVELOPE_MAX 5000
+
+/* Wide mode's log (dB) amplitude scale, in log2_q4() units (1/16 of an
+ * octave of amplitude = ~0.38dB), applied after the tilt below:
+ * LOG_TOP_Q4 maps to a full-height bar, LOG_RANGE_Q4 below that to an
+ * empty one. Calibrated with tools/spectrum_calibrate.c over all nine
+ * songs in mods/ (tilted values, every band and 40ms frame): p10=127,
+ * p50=160, p90=184, p99=201, p99.9=214. So the top sits between p99 and
+ * p99.9 (loud bands touch it now and then, Winamp-style bouncing) and a
+ * ~30dB range puts the floor right at p10 (quiet passages drop to empty).
+ */
+#ifndef LOG_TOP_Q4
+#define LOG_TOP_Q4   205
+#endif
+#ifndef LOG_RANGE_Q4
+#define LOG_RANGE_Q4 80    /* ~30dB: 80 / 16 octaves * 6.02dB */
+#endif
+
+/* Wide mode's tilt compensation, in log2_q4() units per octave above the
+ * lowest band (8 = half an octave of amplitude = ~3dB/octave). Music's
+ * energy falls roughly 3-6dB/octave (plus mod_player's 4.5kHz Amiga
+ * low-pass on top), so without this the highest bands - where hi-hats live
+ * - barely leave the floor on a plain log scale. 0 disables it.
+ */
+#ifndef TILT_Q4_PER_OCT
+#define TILT_Q4_PER_OCT 8
+#endif
+
+/* Peak dot fall speed, Q8.8 pixels per frame (~25 frames/s). */
+#define PEAK_FALL_Q8 (256 * 3 / 4)
 
 void spectrum_accumulate(const int16_t *samples, size_t n)
 {
@@ -133,15 +180,64 @@ static void fft_q15(void)
 	}
 }
 
+/* |re|+|im|: cheap magnitude approximation - no sqrt. */
+static int32_t bin_mag(int bin)
+{
+	int32_t re = fft_re[bin];
+	int32_t im = fft_im[bin];
+
+	return (re < 0 ? -re : re) + (im < 0 ? -im : im);
+}
+
+void spectrum_set_mode(enum spectrum_mode mode)
+{
+	requested_mode = mode;
+}
+
+enum spectrum_mode spectrum_get_mode(void)
+{
+	return requested_mode;
+}
+
+int spectrum_band_count(void)
+{
+	return (active_mode == SPECTRUM_MODE_WIDE) ? SPECTRUM_WIDE_BANDS : SPECTRUM_BANDS;
+}
+
 void spectrum_process(void)
 {
+	enum spectrum_mode mode = requested_mode;
+
+	if (mode != active_mode) {
+		memset(envelope, 0, sizeof(envelope));
+		memset(peak_q8, 0, sizeof(peak_q8));
+		active_mode = mode;
+	}
+
 	fft_q15();
 
-	for (int i = 0; i < SPECTRUM_BANDS; i++) {
-		int bin = fft_band_bin[i];
-		int16_t re = fft_re[bin];
-		int16_t im = fft_im[bin];
-		int32_t mag = (re < 0 ? -re : re) + (im < 0 ? -im : im);   /* |re|+|im|, cheap magnitude approximation - no sqrt */
+	int n = spectrum_band_count();
+
+	for (int i = 0; i < n; i++) {
+		int32_t mag;
+
+		if (mode == SPECTRUM_MODE_WIDE) {
+			/* Max over the band's whole bin range, not one bin:
+			 * noise-like content (hi-hats) is spread across many
+			 * bins, so any single one catches only a fraction.
+			 */
+			mag = 0;
+			for (int bin = fft_wide_lo[i]; bin <= fft_wide_hi[i]; bin++) {
+				int32_t m = bin_mag(bin);
+
+				if (m > mag) {
+					mag = m;
+				}
+			}
+		} else {
+			mag = bin_mag(fft_band_bin[i]);
+		}
+
 		int32_t alpha = (mag > envelope[i]) ? ATTACK_ALPHA_Q14 : DECAY_ALPHA_Q14;
 
 		envelope[i] += (int32_t)(((int64_t)alpha * (mag - envelope[i])) >> 14);
@@ -150,21 +246,84 @@ void spectrum_process(void)
 
 void spectrum_get_raw_envelope(int32_t *out)
 {
-	for (int i = 0; i < SPECTRUM_BANDS; i++) {
+	int n = spectrum_band_count();
+
+	for (int i = 0; i < n; i++) {
 		out[i] = envelope[i];
 	}
 }
 
-void spectrum_get_levels(uint8_t *out, uint8_t max_value)
+/* log2(v) in Q4 (16 steps per octave): integer part from the top set bit,
+ * fraction from the next 4 bits below it - linear interpolation of the
+ * mantissa, within ~0.09 octave of the true log2. Cheap on an M0+ (no FPU,
+ * no CLZ instruction either - the loop is at most 31 steps).
+ */
+static int32_t log2_q4(uint32_t v)
 {
-	for (int i = 0; i < SPECTRUM_BANDS; i++) {
-		int32_t scaled = (envelope[i] * (int32_t)max_value) / ENVELOPE_MAX;
+	if (v == 0) {
+		return 0;
+	}
+	int msb = 31;
 
-		if (scaled > max_value) {
-			scaled = max_value;
-		} else if (scaled < 0) {
-			scaled = 0;
+	while (!(v & (1u << msb))) {
+		msb--;
+	}
+	uint32_t frac = (msb >= 4) ? (v >> (msb - 4)) : (v << (4 - msb));
+
+	return msb * 16 + (int32_t)(frac & 15);
+}
+
+/* Wide band i's displayed level on the log scale, before mapping to
+ * pixels: log2 of its envelope plus the tilt for its octave.
+ */
+static int32_t wide_log_q4(int i)
+{
+	return log2_q4((uint32_t)envelope[i]) +
+	       (((int32_t)fft_wide_oct_q8[i] * TILT_Q4_PER_OCT) >> 8);
+}
+
+static uint8_t clamp_level(int32_t v, uint8_t max_value)
+{
+	if (v > max_value) {
+		return max_value;
+	}
+	return (v < 0) ? 0 : (uint8_t)v;
+}
+
+void spectrum_get_levels(uint8_t *out, uint8_t *peaks, uint8_t max_value)
+{
+	int n = spectrum_band_count();
+
+	for (int i = 0; i < n; i++) {
+		if (active_mode != SPECTRUM_MODE_WIDE) {
+			out[i] = clamp_level((envelope[i] * (int32_t)max_value) / ENVELOPE_MAX,
+					     max_value);
+			if (peaks) {
+				peaks[i] = 0;   /* fine mode: no peak dots */
+			}
+			continue;
 		}
-		out[i] = (uint8_t)scaled;
+
+		int32_t db = wide_log_q4(i) - (LOG_TOP_Q4 - LOG_RANGE_Q4);
+		uint8_t level = clamp_level((db * max_value) / LOG_RANGE_Q4, max_value);
+
+		out[i] = level;
+
+		/* Winamp-style peak dot: jumps up with the bar, then falls at a
+		 * constant speed until the bar catches it again.
+		 */
+		int32_t level_q8 = (int32_t)level << 8;
+
+		if (level_q8 >= peak_q8[i]) {
+			peak_q8[i] = level_q8;
+		} else {
+			peak_q8[i] -= PEAK_FALL_Q8;
+			if (peak_q8[i] < level_q8) {
+				peak_q8[i] = level_q8;
+			}
+		}
+		if (peaks) {
+			peaks[i] = (uint8_t)(peak_q8[i] >> 8);
+		}
 	}
 }

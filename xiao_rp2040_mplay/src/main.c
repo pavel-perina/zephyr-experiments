@@ -273,10 +273,12 @@ static void spectrum_thread(void *p1, void *p2, void *p3)
 	while (1) {
 		spectrum_process();
 
-		uint8_t bar_heights[SPECTRUM_BANDS];
+		uint8_t bar_heights[SPECTRUM_MAX_BANDS];
+		uint8_t bar_peaks[SPECTRUM_MAX_BANDS];
 
-		spectrum_get_levels(bar_heights, SPECTRUM_BAR_MAX);
-		int ret = oled_draw_bars(bar_heights, SPECTRUM_BANDS, SPECTRUM_BAR_MAX);
+		spectrum_get_levels(bar_heights, bar_peaks, SPECTRUM_BAR_MAX);
+		int ret = oled_draw_bars(bar_heights, bar_peaks, spectrum_band_count(),
+					 SPECTRUM_BAR_MAX);
 
 		if (ret != 0) {
 			oled_errors++;
