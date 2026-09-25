@@ -37,6 +37,7 @@
 
 #include "mod_player.h"
 #include "mod_data.h"
+#include "vu_neopixel.h"
 
 /* A3/D3 = GPIO29 = PWM slice 6, channel B (slice = (gpio>>1)&7, channel =
  * gpio&1). Zephyr's PWM "channel" numbering is slice*2 + (0=A, 1=B).
@@ -92,6 +93,7 @@ static int16_t mono_scratch[BUF_LEN];
 static void fill_buffer(uint16_t *b)
 {
 	mod_player_produce(&player, mono_scratch, BUF_LEN);
+	vu_neopixel_update(mono_scratch, BUF_LEN);   /* real level, before buzzer-only gain/clamp */
 	for (int i = 0; i < BUF_LEN; i++) {
 		int32_t sample = (int32_t)mono_scratch[i] * BUZZER_GAIN;
 
@@ -165,6 +167,10 @@ int main(void)
 	if (mod_player_init(&player, mod_data, mod_data_len) != 0) {
 		printk("mod_player_init failed - bad or unrecognized MOD data\n");
 		return 0;
+	}
+
+	if (vu_neopixel_init() != 0) {
+		printk("NeoPixel not ready - continuing without the VU meter\n");
 	}
 
 	fill_buffer(buf[0]);

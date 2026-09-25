@@ -12,7 +12,7 @@ set(SHIELD seeed_xiao_expansion_board)
 find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
 project(xiao_rp2040_mplay)
 
-target_sources(app PRIVATE src/main.c src/mod_player.c)
+target_sources(app PRIVATE src/main.c src/mod_player.c src/vu_neopixel.c)
 
 # Embed the MOD file as flash data (mod_data[] / mod_data_len), generated at
 # build time into the build directory rather than committing a ~6x larger
