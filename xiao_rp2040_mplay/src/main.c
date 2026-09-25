@@ -69,6 +69,21 @@ K_SEM_DEFINE(fill_needed_sem, 0, 1);
 static struct PlayerState player;
 static int16_t mono_scratch[BUF_LEN];
 
+/* mod_player.c's MIX_SCALE is shared across every target and deliberately
+ * keeps headroom for the I2S DAC/amp chain (see pico_dma/README.md: "keeps
+ * 6 dB of signal-to-noise at the DAC/amp instead of giving it away as
+ * headroom"). That headroom is exactly wrong here: this is a bare,
+ * unamplified piezo driven straight off a GPIO, with no downstream gain
+ * stage at all, so the mixer's modest typical amplitude barely swings the
+ * PWM duty cycle - likely why it was silent rather than merely quiet.
+ * Recovered locally, per the same principle as the earlier volume-control
+ * discussion (gain belongs at the output stage, not the shared mixer):
+ * heavy clipping here is fine, even expected - a piezo buzzer isn't a
+ * hi-fi transducer, and a near-full square-wave swing is what actually
+ * moves it audibly. Starting value, likely needs tuning by ear.
+ */
+#define BUZZER_GAIN 8
+
 /* Renders BUF_LEN mono samples from the MOD mixer, then rescales each one
  * from mod_player's signed 16-bit PCM range into an unsigned PWM duty value
  * in [0, pwm_top] - the buzzer analogue of pico_mplay's "pack into a stereo
@@ -78,7 +93,15 @@ static void fill_buffer(uint16_t *b)
 {
 	mod_player_produce(&player, mono_scratch, BUF_LEN);
 	for (int i = 0; i < BUF_LEN; i++) {
-		int32_t shifted = (int32_t)mono_scratch[i] + 32768;   /* -> [0, 65535] */
+		int32_t sample = (int32_t)mono_scratch[i] * BUZZER_GAIN;
+
+		if (sample > 32767) {
+			sample = 32767;
+		} else if (sample < -32768) {
+			sample = -32768;
+		}
+
+		int32_t shifted = sample + 32768;   /* -> [0, 65535] */
 		uint32_t duty = ((uint32_t)shifted * (pwm_top + 1)) >> 16;
 
 		if (duty > pwm_top) {
