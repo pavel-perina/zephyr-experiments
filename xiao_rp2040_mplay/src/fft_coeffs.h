@@ -26,7 +26,7 @@ static const uint8_t fft_bitrev[FFT_N] = {
  * see band_to_bin_table()'s docstring for why this is the direction
  * that can't leave a band with no bin (the reverse mapping can). */
 static const uint8_t fft_band_bin[FFT_BANDS] = {
-	0, 0, 1, 1, 1, 1, 2, 3, 4, 5, 7, 9, 13, 17, 24, 32,
+	1, 1, 1, 1, 1, 1, 2, 3, 4, 5, 7, 9, 13, 17, 24, 32,
 };
 
 #endif

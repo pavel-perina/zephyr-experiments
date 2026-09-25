@@ -60,7 +60,12 @@ def band_to_bin_table(n, fs, bands, fmin, fmax):
     for i in range(bands):
         freq = fmin * (ratio ** (i / (bands - 1)))
         bin_idx = round(freq * n / fs)
-        table.append(max(0, min(n // 2, bin_idx)))
+        # Never bin 0: that's DC (the signal's average/offset), not a
+        # frequency - a band "nearest" to it would display a meaningless
+        # value instead of any real spectral content. fmin=80Hz always
+        # rounds to bin 0 at these N/fs settings, so this floor matters in
+        # practice, not just as a theoretical edge case.
+        table.append(max(1, min(n // 2, bin_idx)))
     return table
 
 
