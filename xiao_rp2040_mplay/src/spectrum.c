@@ -34,11 +34,25 @@ static int32_t envelope[SPECTRUM_BANDS];
  */
 #define ENVELOPE_MAX 8000000
 
+/* Curiosity test before committing to a full FFT rewrite: decimating the
+ * input directly cuts the per-sample filter-bank cost proportionally
+ * (1/3 the multiplies at DECIMATE=3), no structural change needed.
+ * spectrum_coeffs.h was regenerated for fs=16000 (48000/DECIMATE) to
+ * match - the coefficients assume updates happen at this rate, so
+ * DECIMATE must stay in sync with whatever --fs the coeffs were built
+ * with. Naive (no explicit anti-alias filter): the mixer's own Amiga-
+ * style low-pass (FILTER_CUTOFF_HZ=4500 in mod_player.c) already runs on
+ * every sample before this ever sees it, and 4500Hz is comfortably under
+ * this decimation's new Nyquist (8000Hz at DECIMATE=3), so it already does
+ * most of that job.
+ */
+#define DECIMATE 3
+
 void spectrum_update(const int16_t *samples, size_t n)
 {
 	int32_t buf_peak[SPECTRUM_BANDS] = {0};
 
-	for (size_t s = 0; s < n; s++) {
+	for (size_t s = 0; s < n; s += DECIMATE) {
 		int32_t input = (int32_t)samples[s] << STATE_FRAC_BITS;
 
 		for (int i = 0; i < SPECTRUM_BANDS; i++) {

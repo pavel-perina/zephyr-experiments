@@ -100,7 +100,11 @@ static int16_t mono_scratch[BUF_LEN];
 static void fill_buffer(uint16_t *b)
 {
 	mod_player_produce(&player, mono_scratch, BUF_LEN);
-	vu_neopixel_update(mono_scratch, BUF_LEN);   /* real level, before buzzer-only gain/clamp */
+	/* Temporarily disabled while chasing underruns - not the likely
+	 * cause (cheap, ~30us PIO write) but ruling it out. Not committing
+	 * this alone.
+	 */
+	/* vu_neopixel_update(mono_scratch, BUF_LEN); */
 
 	spectrum_update(mono_scratch, BUF_LEN);
 	uint8_t bar_heights[SPECTRUM_BANDS];
