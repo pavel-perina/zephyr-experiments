@@ -1,89 +1,106 @@
 #include "spectrum.h"
+#include "fft_coeffs.h"
 
-/* Q(23).8 for filter state (low/band) and the input samples promoted into
- * that scale - same FILTER_FRAC_BITS=8 convention as mod_player.c's own
- * one-pole filter. Coefficients (spectrum_f_q14/spectrum_q_q14) are Q0.14,
- * matching mod_player.c's ALPHA_FRAC_BITS=14 for filter_alpha.
+/* Replaces the earlier 16-band IIR filter bank (see git history) after it
+ * turned out to cost more total multiplies than a single per-buffer FFT
+ * would, for coarser resolution: 16 bands x 3 multiplies x ~85 decimated
+ * samples/buffer (~4080/buffer after the 3x decimation experiment) versus
+ * this FFT's 64*log2(64)/2 = 192 butterflies x 4 real multiplies = 768
+ * multiplies/buffer, done once, covering 33 bins instead of 16 bands.
+ *
+ * Classic Q1.15 scaled radix-2 decimation-in-time FFT - the standard
+ * fixed-point DSP approach (same technique CMSIS-DSP's arm_cfft_q15
+ * uses): every butterfly's outputs are halved (>>1) before being stored,
+ * which exactly cancels the worst-case 2x magnitude growth a butterfly
+ * addition can produce, so after FFT_STAGES stages nothing has grown
+ * unboundedly - no int64 promotion needed anywhere in the FFT itself,
+ * unlike the IIR bank's resonant-peak growth.
  */
-#define STATE_FRAC_BITS 8
-#define COEFF_FRAC_BITS 14
 
-/* Chamberlin state-variable filter, one instance per band, run over every
- * sample - see mod_player.c's own one-pole filter for the same fixed-point
- * multiply-accumulate-then-shift pattern this follows.
- */
-static int32_t low_state[SPECTRUM_BANDS];
-static int32_t band_state[SPECTRUM_BANDS];
+#define DECIMATE 3   /* input samples per FFT sample, 48000/3 = 16000Hz - matches fft_coeffs.h's --fs */
 
-/* Smoothed per-band peak, persistent across calls - same fast-attack/
- * slow-decay ballistics idea as vu_neopixel.c's envelope, just fixed-point
- * instead of float since this runs per-sample-derived-per-buffer across 16
- * bands rather than once per buffer for a single value.
- */
+static int16_t fft_re[FFT_N];
+static int16_t fft_im[FFT_N];
+
 static int32_t envelope[SPECTRUM_BANDS];
 
 #define ATTACK_ALPHA_Q14 14746   /* ~0.9 in Q0.14 */
 #define DECAY_ALPHA_Q14  819     /* ~0.05 in Q0.14 */
 
-/* Calibrated empirically (host harness, same pattern as the VU meter's
- * LEVEL_GAIN) against AXEL_F.MOD's real output after fixing the int32
- * overflow above: raw envelope values across all 16 bands peaked around
- * 2-13 million (Q23.8) with typical averages 0.9-3.8 million. 8M lets the
- * loudest bands' peaks reach full bar height without every band clipping
- * there constantly.
+/* Calibrated empirically (host harness against AXEL_F.MOD): the |re|+|im|
+ * magnitude approximation's envelope peaked around 4800-6900 across bands
+ * for this song. 7000 lets the loudest bands reach full bar height without
+ * clipping there constantly.
  */
-#define ENVELOPE_MAX 8000000
+#define ENVELOPE_MAX 7000
 
-/* Curiosity test before committing to a full FFT rewrite: decimating the
- * input directly cuts the per-sample filter-bank cost proportionally
- * (1/3 the multiplies at DECIMATE=3), no structural change needed.
- * spectrum_coeffs.h was regenerated for fs=16000 (48000/DECIMATE) to
- * match - the coefficients assume updates happen at this rate, so
- * DECIMATE must stay in sync with whatever --fs the coeffs were built
- * with. Naive (no explicit anti-alias filter): the mixer's own Amiga-
- * style low-pass (FILTER_CUTOFF_HZ=4500 in mod_player.c) already runs on
- * every sample before this ever sees it, and 4500Hz is comfortably under
- * this decimation's new Nyquist (8000Hz at DECIMATE=3), so it already does
- * most of that job.
- */
-#define DECIMATE 3
-
-void spectrum_update(const int16_t *samples, size_t n)
+static void fft_q15(void)
 {
-	int32_t buf_peak[SPECTRUM_BANDS] = {0};
+	for (int i = 0; i < FFT_N; i++) {
+		int j = fft_bitrev[i];
 
-	for (size_t s = 0; s < n; s += DECIMATE) {
-		int32_t input = (int32_t)samples[s] << STATE_FRAC_BITS;
+		if (j > i) {
+			int16_t t = fft_re[i];
 
-		for (int i = 0; i < SPECTRUM_BANDS; i++) {
-			/* coefficient (Q0.14, up to ~16384) * state (Q23.8, can
-			 * legitimately reach the millions at a resonant peak)
-			 * overflows int32_t before the shift - promote to
-			 * int64_t for the multiply, same as any fixed-point
-			 * product whose operands' ranges can multiply past 2^31.
-			 * Cortex-M0 has SMULL (32x32->64) as a baseline ARMv6-M
-			 * instruction, so this is one real instruction, not a
-			 * software 64-bit multiply routine.
-			 */
-			low_state[i] += (int32_t)(((int64_t)spectrum_f_q14[i] * band_state[i]) >> COEFF_FRAC_BITS);
-
-			int32_t resonance = (int32_t)(((int64_t)spectrum_q_q14[i] * band_state[i]) >> COEFF_FRAC_BITS);
-			int32_t high = input - low_state[i] - resonance;
-
-			band_state[i] += (int32_t)(((int64_t)spectrum_f_q14[i] * high) >> COEFF_FRAC_BITS);
-
-			int32_t abs_band = band_state[i] < 0 ? -band_state[i] : band_state[i];
-
-			if (abs_band > buf_peak[i]) {
-				buf_peak[i] = abs_band;
-			}
+			fft_re[i] = fft_re[j];
+			fft_re[j] = t;
+			t = fft_im[i];
+			fft_im[i] = fft_im[j];
+			fft_im[j] = t;
 		}
 	}
 
-	for (int i = 0; i < SPECTRUM_BANDS; i++) {
-		int32_t alpha = (buf_peak[i] > envelope[i]) ? ATTACK_ALPHA_Q14 : DECAY_ALPHA_Q14;
+	int half = 1;
 
-		envelope[i] += (int32_t)(((int64_t)alpha * (buf_peak[i] - envelope[i])) >> COEFF_FRAC_BITS);
+	for (int stage = 0; stage < FFT_STAGES; stage++) {
+		int step = FFT_N / (half * 2);   /* twiddle table stride for this stage */
+
+		for (int group = 0; group < FFT_N; group += half * 2) {
+			for (int k = 0; k < half; k++) {
+				int ie = group + k;
+				int io = ie + half;
+				int16_t wr = fft_twiddle_re[k * step];
+				int16_t wi = fft_twiddle_im[k * step];
+				int16_t or_ = fft_re[io];
+				int16_t oi = fft_im[io];
+
+				/* complex multiply (odd term * twiddle), Q1.15 x Q1.15
+				 * -> Q2.30 in the product, >>15 back to Q1.15.
+				 */
+				int32_t tr = (((int32_t)or_ * wr) - ((int32_t)oi * wi)) >> 15;
+				int32_t ti = (((int32_t)or_ * wi) + ((int32_t)oi * wr)) >> 15;
+				int32_t er = fft_re[ie];
+				int32_t ei = fft_im[ie];
+
+				fft_re[ie] = (int16_t)((er + tr) >> 1);
+				fft_im[ie] = (int16_t)((ei + ti) >> 1);
+				fft_re[io] = (int16_t)((er - tr) >> 1);
+				fft_im[io] = (int16_t)((ei - ti) >> 1);
+			}
+		}
+		half *= 2;
+	}
+}
+
+void spectrum_update(const int16_t *samples, size_t n)
+{
+	for (int i = 0; i < FFT_N; i++) {
+		size_t idx = (size_t)i * DECIMATE;
+
+		fft_re[i] = (idx < n) ? samples[idx] : 0;
+		fft_im[i] = 0;
+	}
+
+	fft_q15();
+
+	for (int i = 0; i < SPECTRUM_BANDS; i++) {
+		int bin = fft_band_bin[i];
+		int16_t re = fft_re[bin];
+		int16_t im = fft_im[bin];
+		int32_t mag = (re < 0 ? -re : re) + (im < 0 ? -im : im);   /* |re|+|im|, cheap magnitude approximation - no sqrt */
+		int32_t alpha = (mag > envelope[i]) ? ATTACK_ALPHA_Q14 : DECAY_ALPHA_Q14;
+
+		envelope[i] += (int32_t)(((int64_t)alpha * (mag - envelope[i])) >> 14);
 	}
 }
 
