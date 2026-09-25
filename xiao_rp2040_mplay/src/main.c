@@ -91,17 +91,57 @@ static size_t song_idx;
 /* D1 button on the expansion board: the shield's gpio-keys node, which
  * already debounces (debounce-interval-ms, 30ms default - raised to 50ms in
  * boards/xiao_rp2040.overlay) and reports press/release as INPUT_KEY_0
- * events from the input thread. This only raises a flag: switching songs
- * reinitialises `player`, which must happen in main()'s render thread
- * between fill_buffer() calls, never concurrently with one.
+ * events from the input thread.
+ *
+ *  - short press (released before LONG_PRESS_MS): next song. Acted on at
+ *    release, since only then is it known to be short. This only raises a
+ *    flag: switching songs reinitialises `player`, which must happen in
+ *    main()'s render thread between fill_buffer() calls, never concurrently
+ *    with one.
+ *  - long press: toggles the spectrum layout (fine <-> wide) as soon as
+ *    LONG_PRESS_MS elapses, while still held - no need to guess when to
+ *    let go. spectrum_set_mode() is safe from any thread.
+ *
+ * button_state decides which of the two a press becomes, exactly once:
+ * the release handler and the long-press timer both try to move it out of
+ * BTN_PRESSED with a compare-and-swap, and only the winner acts.
  */
+#define LONG_PRESS_MS 600
+
+enum { BTN_IDLE, BTN_PRESSED, BTN_LONG };
+
 static atomic_t next_song_requested;
+static atomic_t button_state = ATOMIC_INIT(BTN_IDLE);
+
+static void long_press_handler(struct k_work *work)
+{
+	ARG_UNUSED(work);
+	if (atomic_cas(&button_state, BTN_PRESSED, BTN_LONG)) {
+		enum spectrum_mode mode = spectrum_get_mode() == SPECTRUM_MODE_WIDE
+						  ? SPECTRUM_MODE_FINE
+						  : SPECTRUM_MODE_WIDE;
+
+		spectrum_set_mode(mode);
+		printk("spectrum: %s\n", mode == SPECTRUM_MODE_WIDE ? "wide" : "fine");
+	}
+}
+static K_WORK_DELAYABLE_DEFINE(long_press_work, long_press_handler);
 
 static void button_cb(struct input_event *evt, void *user_data)
 {
 	ARG_UNUSED(user_data);
-	if (evt->type == INPUT_EV_KEY && evt->code == INPUT_KEY_0 && evt->value == 1) {
+	if (evt->type != INPUT_EV_KEY || evt->code != INPUT_KEY_0) {
+		return;
+	}
+	if (evt->value) {
+		atomic_set(&button_state, BTN_PRESSED);
+		k_work_schedule(&long_press_work, K_MSEC(LONG_PRESS_MS));
+	} else if (atomic_cas(&button_state, BTN_PRESSED, BTN_IDLE)) {
+		/* released before the long-press timer fired: short press */
+		k_work_cancel_delayable(&long_press_work);
 		atomic_set(&next_song_requested, 1);
+	} else {
+		atomic_set(&button_state, BTN_IDLE);   /* end of a long press */
 	}
 }
 INPUT_CALLBACK_DEFINE(NULL, button_cb, NULL);
