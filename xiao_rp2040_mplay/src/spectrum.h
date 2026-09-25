@@ -4,7 +4,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define SPECTRUM_BANDS 16   /* must match fft_coeffs.h's --bands (fft_band_bin's range) */
+#define SPECTRUM_BANDS 128   /* must match fft_coeffs.h's --bands (fft_band_bin's range) */
 
 /* Call once per rendered audio buffer (same input as vu_neopixel_update() -
  * the mixer's raw mono PCM, before any buzzer-only gain/clamp), from the

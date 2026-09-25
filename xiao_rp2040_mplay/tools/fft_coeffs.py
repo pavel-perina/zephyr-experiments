@@ -51,21 +51,34 @@ def band_to_bin_table(n, fs, bands, fmin, fmax):
     # (host harness against real playback: several low bands sat at
     # exactly zero the entire time, not just quiet). Going the other way -
     # each band picks its single *nearest* bin by centre frequency - can't
-    # have that gap: every band always has some nearest bin, even if two
-    # adjacent bands end up sharing one (expected/fine at 64 points; that's
-    # the resolution tradeoff already accepted for a passive-piezo buzzer
-    # with no real bass anyway).
+    # have that gap: every band always has some nearest bin.
+    #
+    # At a high enough band count (128 was tried against a 512-point FFT's
+    # 257 bins) plain nearest-bin produces the opposite problem instead:
+    # many low bands collide on the *same* bin - confirmed empirically,
+    # 128 requested bands only used 87 distinct bins, the low ~30 bands
+    # clumped into blocks of 5-9 identical values. Forcing each band to a
+    # bin strictly greater than the previous band's - bump forward past
+    # whatever's already claimed instead of colliding - fixes that: where
+    # log-spaced targets are packed tighter than the bin resolution (the
+    # low end), every band claims the next unclaimed bin in sequence,
+    # which is exactly linear spacing; where targets are naturally spread
+    # further apart than one bin (the high end), nothing needs bumping and
+    # it stays log-spaced. Net effect: log where the FFT has the
+    # resolution to support it, linear exactly where it doesn't - "semi-
+    # linear" without needing a separate linear/log split point to tune.
     ratio = fmax / fmin
     table = []
+    prev_bin = 0   # 0 is DC, never a valid assignment - see the floor below
     for i in range(bands):
         freq = fmin * (ratio ** (i / (bands - 1)))
         bin_idx = round(freq * n / fs)
-        # Never bin 0: that's DC (the signal's average/offset), not a
-        # frequency - a band "nearest" to it would display a meaningless
-        # value instead of any real spectral content. fmin=80Hz always
-        # rounds to bin 0 at these N/fs settings, so this floor matters in
-        # practice, not just as a theoretical edge case.
-        table.append(max(1, min(n // 2, bin_idx)))
+        # Never bin 0 (DC, not a frequency) and never <= the previous
+        # band's bin (would duplicate it) - both a floor of prev_bin + 1.
+        bin_idx = max(prev_bin + 1, bin_idx)
+        bin_idx = min(n // 2, bin_idx)
+        table.append(bin_idx)
+        prev_bin = bin_idx
     return table
 
 

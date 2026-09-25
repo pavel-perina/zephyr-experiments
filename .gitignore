@@ -3,3 +3,4 @@ build/
 *.uf2
 xiao_rp2040_mplay/tools/.venv
 
+xiao_rp2040_mplay/tools/__pycache__

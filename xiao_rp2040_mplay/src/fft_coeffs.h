@@ -7,7 +7,7 @@
 #define FFT_N 512
 #define FFT_STAGES 9
 /* Must match spectrum.h's SPECTRUM_BANDS. */
-#define FFT_BANDS 16
+#define FFT_BANDS 128
 
 /* Q1.15 fixed-point: cos/-sin of 2*pi*k/N, k = 0..N/2-1. */
 static const int16_t fft_twiddle_re[FFT_N / 2] = {
@@ -26,7 +26,7 @@ static const uint16_t fft_bitrev[FFT_N] = {
  * see band_to_bin_table()'s docstring for why this is the direction
  * that can't leave a band with no bin (the reverse mapping can). */
 static const uint16_t fft_band_bin[FFT_BANDS] = {
-	3, 3, 5, 6, 9, 12, 16, 22, 30, 41, 55, 75, 102, 139, 188, 256,
+	3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 107, 111, 115, 120, 124, 129, 133, 138, 143, 149, 154, 160, 166, 172, 178, 185, 192, 199, 206, 214, 221, 230, 238, 247, 256,
 };
 
 #endif
