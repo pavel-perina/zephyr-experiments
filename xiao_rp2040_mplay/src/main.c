@@ -182,7 +182,18 @@ static void spectrum_thread(void *p1, void *p2, void *p3)
 	}
 }
 
-K_THREAD_DEFINE(spectrum_tid, 2048, spectrum_thread, NULL, NULL, NULL,
+/* 4096, not the 2048 this was first sized at: that was picked back when
+ * SPECTRUM_BANDS was still 16 (bar_heights was a 16-byte stack array) and
+ * never revisited after bumping to 128 bands (128 bytes) a few commits
+ * later - on top of the FFT's own frame and however deep the display/I2C
+ * driver call chain goes (display_write -> ssd1306_write -> ... ->
+ * i2c_dw_transfer). RP2040/Cortex-M0 has no MPU stack guard (same
+ * reasoning as the main-thread stack fix earlier in this project), so an
+ * overflow here wouldn't panic cleanly - it'd silently corrupt whatever's
+ * next to this thread's stack, consistent with a hang with no crash
+ * message and an unrelated subsystem (audio) freezing shortly after.
+ */
+K_THREAD_DEFINE(spectrum_tid, 4096, spectrum_thread, NULL, NULL, NULL,
 		 K_LOWEST_APPLICATION_THREAD_PRIO, 0, 0);
 
 int main(void)
