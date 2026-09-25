@@ -104,6 +104,7 @@ static volatile uint32_t underrun_count;
  * entirely rather than merely running behind.
  */
 static volatile uint32_t txstall_count;
+static volatile uint32_t dma_error_count;
 
 K_SEM_DEFINE(fill_needed_sem, 0, 1);
 
@@ -128,23 +129,58 @@ static void fill_buffer(uint32_t *b)
  * keep the gap minimal, bumps the sequence counters, and wakes the main
  * thread to render the buffer that just finished playing - it does *not*
  * render here itself (see the consumed/filled comment above for why).
- * Same driver calls as before (dma_reload()/dma_start()), just no longer
- * doing the mixer's work on the way out.
  */
+static void dma_done(const struct device *dev, void *user_data, uint32_t channel, int status);
+
+/* File-scope so dma_done() can re-arm through them (see arm_next_buffer()). */
+static struct dma_block_config dma_block = {
+	.block_size = BUF_LEN * sizeof(uint32_t),
+	.source_addr_adj = DMA_ADDR_ADJ_INCREMENT,
+	.dest_addr_adj = DMA_ADDR_ADJ_NO_CHANGE,
+};
+static struct dma_config dma_cfg = {
+	.channel_direction = MEMORY_TO_PERIPHERAL,
+	.source_data_size = 4,
+	.dest_data_size = 4,
+	.source_burst_length = 1,
+	.dest_burst_length = 1,
+	.block_count = 1,
+	.head_block = &dma_block,
+	.dma_callback = dma_done,
+};
+
+/* Points the (idle) channel at buffer `next & 1` and triggers it - exactly
+ * once. This used to be dma_reload() + dma_start(), but on the rpi_pico DMA
+ * driver *both* call dma_channel_configure(..., trigger=true), so the second
+ * rewrote READ_ADDR/TRANS_COUNT/CTRL_TRIG on a channel already running,
+ * racing its DREQ. In xiao_rp2040_mplay (same code, PWM-paced) that race
+ * permanently stalled the DMA once every few seconds to minutes; the
+ * bare-metal pico_dma never had it (one dma_channel_transfer_from_buffer_now()
+ * per buffer). dma_config() only stores settings in the driver - no register
+ * writes - so config + start is a single trigger on an idle channel.
+ */
+static void arm_next_buffer(uint32_t next)
+{
+	dma_block.source_address = (uintptr_t)buf[next & 1];
+	dma_config(dma_dev, dma_channel, &dma_cfg);
+	dma_start(dma_dev, dma_channel);
+}
+
 static void dma_done(const struct device *dev, void *user_data, uint32_t channel, int status)
 {
 	ARG_UNUSED(dev);
 	ARG_UNUSED(user_data);
 	ARG_UNUSED(channel);
 	if (status < 0) {
-		return;
+		/* Count it but keep going - returning here without re-arming
+		 * silenced audio permanently.
+		 */
+		dma_error_count++;
 	}
 
 	uint32_t next = consumed + 1;   /* sequence number of the buffer to play now */
 
-	dma_reload(dma_dev, dma_channel, (uintptr_t)buf[next & 1], (uintptr_t)txf,
-		   BUF_LEN * sizeof(uint32_t));
-	dma_start(dma_dev, dma_channel);
+	arm_next_buffer(next);
 
 	/* `next` must be completely rendered by now (filled > next). If the
 	 * main thread hasn't finished it - or hasn't started - DMA is about
@@ -261,30 +297,14 @@ int main(void)
 	/* One 32-bit stereo frame per transfer, source address walks buf[0],
 	 * destination is the PIO FIFO register and never moves.
 	 */
-	struct dma_block_config block = {
-		.source_address = (uintptr_t)buf[0],
-		.dest_address = (uintptr_t)txf,
-		.block_size = BUF_LEN * sizeof(uint32_t),
-		.source_addr_adj = DMA_ADDR_ADJ_INCREMENT,
-		.dest_addr_adj = DMA_ADDR_ADJ_NO_CHANGE,
-	};
+	dma_block.dest_address = (uintptr_t)txf;
 	/* dma_slot paces the channel from the PIO SM's own TX DREQ (fires
 	 * whenever the FIFO has room), same DREQ pio_get_dreq() would give
 	 * the bare-metal version - just wrapped for Zephyr's dma_slot field.
 	 */
-	struct dma_config cfg = {
-		.channel_direction = MEMORY_TO_PERIPHERAL,
-		.source_data_size = 4,
-		.dest_data_size = 4,
-		.source_burst_length = 1,
-		.dest_burst_length = 1,
-		.block_count = 1,
-		.head_block = &block,
-		.dma_slot = RPI_PICO_DMA_DREQ_TO_SLOT(pio_get_dreq(pio, sm, true)),
-		.dma_callback = dma_done,
-	};
-
-	dma_config(dma_dev, dma_channel, &cfg);
+	dma_cfg.dma_slot = RPI_PICO_DMA_DREQ_TO_SLOT(pio_get_dreq(pio, sm, true));
+	dma_block.source_address = (uintptr_t)buf[0];
+	dma_config(dma_dev, dma_channel, &dma_cfg);
 
 	/* Enable the SM before the first DMA transfer, same order as the
 	 * bare-metal version, so it's already waiting on the FIFO rather
@@ -326,9 +346,9 @@ int main(void)
 		 * else (e.g. a power-supply issue affecting the amp/DAC).
 		 */
 		if (k_uptime_get() >= next_report) {
-			printk("pos=%d row=%d underruns=%u txstall=%u\n",
+			printk("pos=%d row=%d underruns=%u txstall=%u dma_errs=%u\n",
 			       player.current_position, player.current_row,
-			       underrun_count, txstall_count);
+			       underrun_count, txstall_count, dma_error_count);
 			next_report += 1000;
 		}
 	}
