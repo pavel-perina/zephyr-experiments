@@ -1,6 +1,8 @@
 #ifndef OLED_DISPLAY_H
 #define OLED_DISPLAY_H
 
+#include <stdint.h>
+
 /* Grabs the SSD1306 (zephyr,display chosen node, from the
  * seeed_xiao_expansion_board shield) and blanks it to all-black.
  *
@@ -11,5 +13,14 @@
  * ready - caller decides whether that's fatal.
  */
 int oled_display_init(void);
+
+/* Draws heights[0..n_bars-1] as a bottom-up bar graph. Redraws the local
+ * frame buffer fully every call (cheap, no I2C) but only pushes one 8-row
+ * page over I2C per call (~2.9ms, fits inside one audio buffer's budget) -
+ * cycles through all pages across calls (~24Hz full-screen refresh). Safe
+ * to call inline from the render thread every buffer, same as
+ * vu_neopixel_update() - see the .c file for why chunking makes that safe.
+ */
+void oled_draw_bars(const uint8_t *heights, int n_bars, uint8_t max_height);
 
 #endif

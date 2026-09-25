@@ -39,6 +39,7 @@
 #include "mod_data.h"
 #include "vu_neopixel.h"
 #include "oled_display.h"
+#include "spectrum.h"
 
 /* A3/D3 = GPIO29 = PWM slice 6, channel B (slice = (gpio>>1)&7, channel =
  * gpio&1). Zephyr's PWM "channel" numbering is slice*2 + (0=A, 1=B).
@@ -91,10 +92,22 @@ static int16_t mono_scratch[BUF_LEN];
  * in [0, pwm_top] - the buzzer analogue of pico_mplay's "pack into a stereo
  * I2S frame" step.
  */
+/* OLED bar-graph height cap - same value used as spectrum_get_levels()'s
+ * max_value and oled_draw_bars()'s max_height.
+ */
+#define SPECTRUM_BAR_MAX 64
+
 static void fill_buffer(uint16_t *b)
 {
 	mod_player_produce(&player, mono_scratch, BUF_LEN);
 	vu_neopixel_update(mono_scratch, BUF_LEN);   /* real level, before buzzer-only gain/clamp */
+
+	spectrum_update(mono_scratch, BUF_LEN);
+	uint8_t bar_heights[SPECTRUM_BANDS];
+
+	spectrum_get_levels(bar_heights, SPECTRUM_BAR_MAX);
+	oled_draw_bars(bar_heights, SPECTRUM_BANDS, SPECTRUM_BAR_MAX);
+
 	for (int i = 0; i < BUF_LEN; i++) {
 		int32_t sample = (int32_t)mono_scratch[i] * BUZZER_GAIN;
 
