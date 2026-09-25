@@ -1,0 +1,38 @@
+/*
+ * The board's own pinctrl (xiao_rp2040-pinctrl.dtsi) only defines
+ * pwm_ch4b_default (GPIO25, the blue LED) - the passive buzzer on this
+ * board's expansion header is A3/D3 = GPIO29 = PWM slice 6, channel B
+ * (slice = (gpio >> 1) & 7, channel = gpio & 1), which needs its own group.
+ */
+#include <zephyr/dt-bindings/pinctrl/rpi-pico-rp2040-pinctrl.h>
+#include <zephyr/dt-bindings/gpio/gpio.h>
+
+/ {
+	chosen {
+		zephyr,console = &usb_cdc;
+	};
+};
+
+&pinctrl {
+	pwm_ch6b_default: pwm_ch6b_default {
+		group1 {
+			pinmux = <RP2XXX_PINMUX(29, RP2_PINCTRL_GPIO_FUNC_PWM)>;
+		};
+	};
+};
+
+&pwm {
+	status = "okay";
+	pinctrl-0 = <&pwm_ch6b_default>;
+	pinctrl-names = "default";
+};
+
+&dma {
+	status = "okay";
+};
+
+&zephyr_udc0 {
+	usb_cdc: usb_cdc_0 {
+		compatible = "zephyr,cdc-acm-uart";
+	};
+};
