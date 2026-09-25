@@ -82,7 +82,7 @@ static int16_t mono_scratch[BUF_LEN];
  * hi-fi transducer, and a near-full square-wave swing is what actually
  * moves it audibly. Starting value, likely needs tuning by ear.
  */
-#define BUZZER_GAIN 8
+#define BUZZER_GAIN 4
 
 /* Renders BUF_LEN mono samples from the MOD mixer, then rescales each one
  * from mod_player's signed 16-bit PCM range into an unsigned PWM duty value
