@@ -36,3 +36,10 @@
 		compatible = "zephyr,cdc-acm-uart";
 	};
 };
+
+/* D1 button (the shield's gpio-keys node, which has no label of its own):
+ * a bit more debounce than the 30ms default for this tactile switch.
+ */
+&{/buttons} {
+	debounce-interval-ms = <50>;
+};

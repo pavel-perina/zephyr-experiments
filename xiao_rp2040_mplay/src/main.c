@@ -28,6 +28,7 @@
 #include <zephyr/drivers/pwm.h>
 #include <zephyr/drivers/dma.h>
 #include <zephyr/drivers/gpio.h>
+#include <zephyr/input/input.h>
 #include <zephyr/sys/barrier.h>
 #if defined(CONFIG_SOC_SERIES_RP2350)
 #include <zephyr/dt-bindings/dma/rpi-pico-dma-rp2350.h>
@@ -38,7 +39,7 @@
 #include <hardware/structs/dma.h>
 
 #include "mod_player.h"
-#include "mod_data.h"
+#include "mod_table.h"
 #include "vu_neopixel.h"
 #include "oled_display.h"
 #include "spectrum.h"
@@ -85,6 +86,46 @@ static volatile int oled_last_error;
 K_SEM_DEFINE(fill_needed_sem, 0, 1);
 
 static struct PlayerState player;
+static size_t song_idx;
+
+/* D1 button on the expansion board: the shield's gpio-keys node, which
+ * already debounces (debounce-interval-ms, 30ms default - raised to 50ms in
+ * boards/xiao_rp2040.overlay) and reports press/release as INPUT_KEY_0
+ * events from the input thread. This only raises a flag: switching songs
+ * reinitialises `player`, which must happen in main()'s render thread
+ * between fill_buffer() calls, never concurrently with one.
+ */
+static atomic_t next_song_requested;
+
+static void button_cb(struct input_event *evt, void *user_data)
+{
+	ARG_UNUSED(user_data);
+	if (evt->type == INPUT_EV_KEY && evt->code == INPUT_KEY_0 && evt->value == 1) {
+		atomic_set(&next_song_requested, 1);
+	}
+}
+INPUT_CALLBACK_DEFINE(NULL, button_cb, NULL);
+
+/* Loads mod_table[idx], or the next one that parses if it doesn't (a failed
+ * mod_player_init() leaves `player` zeroed - header NULL - which
+ * mod_player_produce() must never see). Returns false if none do.
+ */
+static bool load_song(size_t idx)
+{
+	for (size_t tries = 0; tries < ARRAY_SIZE(mod_table); tries++) {
+		const struct mod_entry *m = &mod_table[idx];
+
+		if (mod_player_init(&player, m->data, m->len) == 0) {
+			song_idx = idx;
+			printk("song %u/%u: %s (%u bytes)\n", (unsigned)idx + 1,
+			       (unsigned)ARRAY_SIZE(mod_table), m->name, (unsigned)m->len);
+			return true;
+		}
+		printk("song %s: mod_player_init failed, skipping\n", m->name);
+		idx = (idx + 1) % ARRAY_SIZE(mod_table);
+	}
+	return false;
+}
 static int16_t mono_scratch[BUF_LEN];
 
 /* mod_player.c's MIX_SCALE is shared across every target and deliberately
@@ -279,8 +320,8 @@ int main(void)
 	printk("cycles_per_sec=%llu period_cycles=%u pwm_top=%u\n",
 	       cycles_per_sec, period_cycles, pwm_top);
 
-	if (mod_player_init(&player, mod_data, mod_data_len) != 0) {
-		printk("mod_player_init failed - bad or unrecognized MOD data\n");
+	if (!load_song(0)) {
+		printk("no playable MOD in mod_table\n");
 		return 0;
 	}
 
@@ -339,6 +380,16 @@ int main(void)
 		k_sem_take(&fill_needed_sem, K_MSEC(100));
 		diag_feed();
 
+		if (atomic_clear(&next_song_requested)) {
+			/* The two buffers already queued still play out the
+			 * old song (~10ms) - not worth flushing.
+			 */
+			if (!load_song((song_idx + 1) % ARRAY_SIZE(mod_table))) {
+				printk("no playable MOD in mod_table\n");
+				return 0;
+			}
+		}
+
 		while ((int32_t)(consumed + 2 - filled) > 0) {
 			fill_buffer(buf[filled & 1]);
 			barrier_dmem_fence_full();
@@ -350,8 +401,9 @@ int main(void)
 		 * is audible, plus the underrun count.
 		 */
 		if (k_uptime_get() >= next_report) {
-			printk("pos=%d row=%d underruns=%u dma_irqs=%u dma_errs=%u(%d) "
+			printk("song=%u pos=%d row=%d underruns=%u dma_irqs=%u dma_errs=%u(%d) "
 			       "spec_loops=%u oled_errs=%u(%d)\n",
+			       (unsigned)song_idx + 1,
 			       player.current_position, player.current_row,
 			       underrun_count, dma_irq_count, dma_error_count,
 			       dma_last_error, spectrum_loops, oled_errors,
