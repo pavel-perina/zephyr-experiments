@@ -4,16 +4,24 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define SPECTRUM_BANDS 16   /* must match fft_coeffs.h's --bands (fft_bin_to_band's range) */
+#define SPECTRUM_BANDS 16   /* must match fft_coeffs.h's --bands (fft_band_bin's range) */
 
 /* Call once per rendered audio buffer (same input as vu_neopixel_update() -
- * the mixer's raw mono PCM, before any buzzer-only gain/clamp). Runs a
- * fixed-point Q1.15 FFT (see spectrum.c) over a decimated slice of the
- * buffer, fixed-point throughout (RP2040/Cortex-M0 has no FPU - same
- * reasoning as mod_player.c's mixer), and updates each band's smoothed
- * peak envelope from the FFT's binned magnitude.
+ * the mixer's raw mono PCM, before any buzzer-only gain/clamp), from the
+ * render thread. Cheap: just decimates and copies samples into a ring
+ * buffer, no FFT here - see spectrum_process().
  */
-void spectrum_update(const int16_t *samples, size_t n);
+void spectrum_accumulate(const int16_t *samples, size_t n);
+
+/* Runs the fixed-point Q1.15 FFT (see spectrum.c) over the ring buffer's
+ * current contents and updates each band's smoothed peak envelope from the
+ * binned magnitude - fixed-point throughout (RP2040/Cortex-M0 has no FPU,
+ * same reasoning as mod_player.c's mixer). Not cheap enough for the render
+ * thread - call this from its own lower-priority thread instead (see
+ * main.c), on whatever cadence makes sense for how often the display
+ * should actually update.
+ */
+void spectrum_process(void);
 
 /* Fills out[SPECTRUM_BANDS] with each band's current envelope, scaled to
  * 0..max_value (inclusive) - e.g. max_value = OLED bar height in pixels.

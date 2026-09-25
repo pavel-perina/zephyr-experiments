@@ -14,12 +14,10 @@
  */
 int oled_display_init(void);
 
-/* Draws heights[0..n_bars-1] as a bottom-up bar graph. Redraws the local
- * frame buffer fully every call (cheap, no I2C) but only pushes one 8-row
- * page over I2C per call (~2.9ms, fits inside one audio buffer's budget) -
- * cycles through all pages across calls (~24Hz full-screen refresh). Safe
- * to call inline from the render thread every buffer, same as
- * vu_neopixel_update() - see the .c file for why chunking makes that safe.
+/* Draws heights[0..n_bars-1] as a bottom-up bar graph and pushes the whole
+ * frame over I2C in one call (~23ms at this shield's 400kHz I2C rate) -
+ * call from spectrum_process()'s own thread, not the render thread (see
+ * main.c and the .c file for why that's safe without page-chunking).
  */
 void oled_draw_bars(const uint8_t *heights, int n_bars, uint8_t max_height);
 

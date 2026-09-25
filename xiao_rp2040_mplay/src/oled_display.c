@@ -17,19 +17,16 @@
 static uint8_t frame[OLED_WIDTH * OLED_PAGES];
 static const struct device *disp_dev;
 
-/* Which page (0..OLED_PAGES-1) the next call pushes - see oled_draw_bars(). */
-static int next_page;
-
-static int push_page(int page)
+static int push_frame(void)
 {
 	struct display_buffer_descriptor desc = {
-		.buf_size = OLED_WIDTH,
+		.buf_size = sizeof(frame),
 		.width = OLED_WIDTH,
-		.height = 8,
+		.height = OLED_HEIGHT,
 		.pitch = OLED_WIDTH,
 	};
 
-	return display_write(disp_dev, 0, page * 8, &desc, &frame[page * OLED_WIDTH]);
+	return display_write(disp_dev, 0, 0, &desc, frame);
 }
 
 int oled_display_init(void)
@@ -41,31 +38,21 @@ int oled_display_init(void)
 		return -1;
 	}
 
-	/* frame[] starts zeroed (static) - blank every page once at boot,
-	 * one push_page() call each (cheap enough to not chunk this one -
-	 * startup, not the render thread's steady-state budget).
-	 */
-	for (int page = 0; page < OLED_PAGES; page++) {
-		int ret = push_page(page);
-
-		if (ret != 0) {
-			return ret;
-		}
-	}
-	return 0;
+	/* frame[] starts zeroed (static) - this doubles as the boot-time blank. */
+	return push_frame();
 }
 
 /* Bottom-up bar graph, n_bars columns spanning the full 128px width with a
  * 1px gap between bars.
  *
- * A full-frame I2C write at this shield's 400kHz Fast-mode rate is ~23ms -
- * longer than four audio buffer periods - so this only pushes ONE 8-row
- * page (128 bytes, ~2.9ms) per call, safely inside one buffer's ~5.33ms
- * budget, cycling through all OLED_PAGES pages across calls (~24Hz full-
- * screen refresh). The local frame redraw itself (pure bit-twiddling, no
- * I2C) is cheap and happens fully every call, so it's never stale - only
- * the slow hardware push is chunked. Safe to call inline from the render
- * thread, same as vu_neopixel_update() - no separate thread needed.
+ * A full-frame I2C write at this shield's 400kHz Fast-mode rate is ~23ms.
+ * That used to be a problem when this ran inline in the render thread
+ * (longer than four audio buffer periods, hence the page-chunking this
+ * function used to do) - now that spectrum_process()/oled_draw_bars() run
+ * in their own lower-priority thread (see main.c), a single blocking call
+ * here can't delay audio: Zephyr's preemptive scheduler always lets the
+ * render thread win whenever it has work, regardless of how long this
+ * thread blocks. So this pushes the whole frame in one call again.
  */
 void oled_draw_bars(const uint8_t *heights, int n_bars, uint8_t max_height)
 {
@@ -107,6 +94,5 @@ void oled_draw_bars(const uint8_t *heights, int n_bars, uint8_t max_height)
 		}
 	}
 
-	push_page(next_page);
-	next_page = (next_page + 1) % OLED_PAGES;
+	push_frame();
 }

@@ -92,10 +92,6 @@ static int16_t mono_scratch[BUF_LEN];
  * in [0, pwm_top] - the buzzer analogue of pico_mplay's "pack into a stereo
  * I2S frame" step.
  */
-/* OLED bar-graph height cap - same value used as spectrum_get_levels()'s
- * max_value and oled_draw_bars()'s max_height.
- */
-#define SPECTRUM_BAR_MAX 64
 
 static void fill_buffer(uint16_t *b)
 {
@@ -106,11 +102,11 @@ static void fill_buffer(uint16_t *b)
 	 */
 	/* vu_neopixel_update(mono_scratch, BUF_LEN); */
 
-	spectrum_update(mono_scratch, BUF_LEN);
-	uint8_t bar_heights[SPECTRUM_BANDS];
-
-	spectrum_get_levels(bar_heights, SPECTRUM_BAR_MAX);
-	oled_draw_bars(bar_heights, SPECTRUM_BANDS, SPECTRUM_BAR_MAX);
+	/* Cheap (just decimates into a ring buffer) - stays inline here, same
+	 * as vu_neopixel_update(). The FFT itself and the OLED push run in
+	 * their own thread (spectrum_thread() below), not every buffer.
+	 */
+	spectrum_accumulate(mono_scratch, BUF_LEN);
 
 	for (int i = 0; i < BUF_LEN; i++) {
 		int32_t sample = (int32_t)mono_scratch[i] * BUZZER_GAIN;
@@ -153,6 +149,41 @@ static void dma_done(const struct device *dev, void *user_data, uint32_t channel
 
 	k_sem_give(&fill_needed_sem);
 }
+
+/* OLED bar-graph height cap - passed as both spectrum_get_levels()'s
+ * max_value and oled_draw_bars()'s max_height.
+ */
+#define SPECTRUM_BAR_MAX 64
+
+/* The FFT (spectrum_process()) and the OLED push (oled_draw_bars()) are
+ * both too slow for the render thread's ~5.33ms/buffer budget - this
+ * thread does them on its own schedule instead, decoupled from audio
+ * timing entirely. Lower priority than main(): Zephyr's preemptive
+ * scheduler always lets the render thread win whenever dma_done() signals
+ * it, no matter how long this thread is mid-FFT or blocked on the OLED's
+ * I2C write - see spectrum.c/oled_display.c for why that makes both safe
+ * to run unchunked here.
+ */
+static void spectrum_thread(void *p1, void *p2, void *p3)
+{
+	ARG_UNUSED(p1);
+	ARG_UNUSED(p2);
+	ARG_UNUSED(p3);
+
+	while (1) {
+		spectrum_process();
+
+		uint8_t bar_heights[SPECTRUM_BANDS];
+
+		spectrum_get_levels(bar_heights, SPECTRUM_BAR_MAX);
+		oled_draw_bars(bar_heights, SPECTRUM_BANDS, SPECTRUM_BAR_MAX);
+
+		k_msleep(40);
+	}
+}
+
+K_THREAD_DEFINE(spectrum_tid, 2048, spectrum_thread, NULL, NULL, NULL,
+		 K_LOWEST_APPLICATION_THREAD_PRIO, 0, 0);
 
 int main(void)
 {
