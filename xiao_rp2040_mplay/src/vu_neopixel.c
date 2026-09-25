@@ -1,9 +1,21 @@
+#include <math.h>
+
 #include <zephyr/device.h>
 #include <zephyr/drivers/led_strip.h>
 
 #include "vu_neopixel.h"
 
 static const struct device *strip_dev;
+
+/* Real VU meters are RMS-based (averaging/ballistic), not peak - a "PPM
+ * peak meter" is the other, faster-reacting kind. Peak-per-buffer pinned
+ * this to full green almost constantly, since any single transient above
+ * half-scale (common - percussion attacks, sample clicks) maxed it out;
+ * RMS is always lower than peak for the same signal (typical music has a
+ * few dB to several dB of crest factor), so it naturally spends less time
+ * pinned and reads closer to perceived loudness.
+ */
+#define MAX_BRIGHTNESS 160   /* out of 255 - full white LED at 5cm is a lot */
 
 /* VU-style ballistics: attack (level rising) is fast so the LED tracks
  * transients, decay (level falling) is slow so it reads like a needle
@@ -33,20 +45,21 @@ int vu_neopixel_init(void)
 static struct led_rgb colour_for(float level)
 {
 	struct led_rgb c = {0};
+	float b = MAX_BRIGHTNESS;
 
 	if (level < 0.5f) {
-		c.g = (uint8_t)(255.0f * (level / 0.5f));
+		c.g = (uint8_t)(b * (level / 0.5f));
 	} else if (level < 0.8f) {
-		c.g = 255;
-		c.r = (uint8_t)(255.0f * ((level - 0.5f) / 0.3f));
+		c.g = (uint8_t)b;
+		c.r = (uint8_t)(b * ((level - 0.5f) / 0.3f));
 	} else {
-		c.r = 255;
+		c.r = (uint8_t)b;
 		float t = (level - 0.8f) / 0.2f;
 
 		if (t > 1.0f) {
 			t = 1.0f;
 		}
-		c.g = (uint8_t)(255.0f * (1.0f - t));
+		c.g = (uint8_t)(b * (1.0f - t));
 	}
 	return c;
 }
@@ -57,20 +70,16 @@ void vu_neopixel_update(const int16_t *samples, size_t n)
 		return;
 	}
 
-	int16_t peak = 0;
+	uint64_t sum_sq = 0;
 
 	for (size_t i = 0; i < n; i++) {
-		int16_t v = samples[i];
+		int32_t v = samples[i];
 
-		if (v < 0) {
-			v = -v;   /* INT16_MIN negation UB is irrelevant here (mixer never outputs it) */
-		}
-		if (v > peak) {
-			peak = v;
-		}
+		sum_sq += (uint32_t)(v * v);
 	}
 
-	float level = (float)peak / 32768.0f;
+	float rms = sqrtf((float)sum_sq / (float)n);
+	float level = rms / 32768.0f;
 	float alpha = (level > envelope) ? ATTACK_ALPHA : DECAY_ALPHA;
 
 	envelope += alpha * (level - envelope);

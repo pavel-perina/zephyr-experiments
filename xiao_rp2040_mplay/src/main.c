@@ -38,6 +38,7 @@
 #include "mod_player.h"
 #include "mod_data.h"
 #include "vu_neopixel.h"
+#include "oled_display.h"
 
 /* A3/D3 = GPIO29 = PWM slice 6, channel B (slice = (gpio>>1)&7, channel =
  * gpio&1). Zephyr's PWM "channel" numbering is slice*2 + (0=A, 1=B).
@@ -171,6 +172,10 @@ int main(void)
 
 	if (vu_neopixel_init() != 0) {
 		printk("NeoPixel not ready - continuing without the VU meter\n");
+	}
+
+	if (oled_display_init() != 0) {
+		printk("OLED not ready or failed to blank\n");
 	}
 
 	fill_buffer(buf[0]);
