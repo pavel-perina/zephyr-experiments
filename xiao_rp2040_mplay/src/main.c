@@ -183,6 +183,47 @@ static void fill_buffer(uint16_t *b)
 	}
 }
 
+static void dma_done(const struct device *dev, void *user_data, uint32_t channel, int status);
+
+/* File-scope so dma_done() can re-arm through them (see arm_next_buffer()). */
+static struct dma_block_config dma_block = {
+	.dest_address = 0,   /* cc_half, set in main() once it's known */
+	.block_size = BUF_LEN * sizeof(uint16_t),
+	.source_addr_adj = DMA_ADDR_ADJ_INCREMENT,
+	.dest_addr_adj = DMA_ADDR_ADJ_NO_CHANGE,
+};
+static struct dma_config dma_cfg = {
+	.channel_direction = MEMORY_TO_PERIPHERAL,
+	.source_data_size = 2,
+	.dest_data_size = 2,
+	.source_burst_length = 1,
+	.dest_burst_length = 1,
+	.block_count = 1,
+	.head_block = &dma_block,
+	.dma_slot = RPI_PICO_DMA_SLOT_PWM_WRAP6,
+	.dma_callback = dma_done,
+};
+static volatile uint32_t dma_restart_count;
+
+/* Points the (idle) channel at buffer `next & 1` and triggers it - exactly
+ * once. This used to be dma_reload() + dma_start(), but on this driver
+ * *both* call dma_channel_configure(..., trigger=true): the second one
+ * rewrote READ_ADDR/TRANS_COUNT/CTRL_TRIG on a channel that was already
+ * running and racing the PWM DREQ. Caught in the act as a permanent stall:
+ * BUSY, EN, no error flags, TRANS_COUNT=1, READ_ADDR on the last sample of
+ * buf[1], PWM still wrapping - waiting forever for a DREQ that never came.
+ * Timing-dependent (IRQ latency vs DREQ phase), hence minutes apart and
+ * only with the I2C/OLED interrupt load around. dma_config() only stores
+ * the settings in the driver (no register writes), so config + start is a
+ * single trigger on an idle channel.
+ */
+static void arm_next_buffer(uint32_t next)
+{
+	dma_block.source_address = (uintptr_t)buf[next & 1];
+	dma_config(dma_dev, dma_channel, &dma_cfg);
+	dma_start(dma_dev, dma_channel);
+}
+
 static void dma_done(const struct device *dev, void *user_data, uint32_t channel, int status)
 {
 	ARG_UNUSED(dev);
@@ -199,9 +240,7 @@ static void dma_done(const struct device *dev, void *user_data, uint32_t channel
 
 	uint32_t next = consumed + 1;
 
-	dma_reload(dma_dev, dma_channel, (uintptr_t)buf[next & 1], (uintptr_t)cc_half,
-		   BUF_LEN * sizeof(uint16_t));
-	dma_start(dma_dev, dma_channel);
+	arm_next_buffer(next);
 
 	if ((int32_t)(filled - next) <= 0) {   /* signed diff: wrap-safe */
 		underrun_count++;
@@ -346,31 +385,13 @@ int main(void)
 	}
 	dma_channel = (uint32_t)ch;
 
-	struct dma_block_config block = {
-		.source_address = (uintptr_t)buf[0],
-		.dest_address = (uintptr_t)cc_half,
-		.block_size = BUF_LEN * sizeof(uint16_t),
-		.source_addr_adj = DMA_ADDR_ADJ_INCREMENT,
-		.dest_addr_adj = DMA_ADDR_ADJ_NO_CHANGE,
-	};
-	struct dma_config cfg = {
-		.channel_direction = MEMORY_TO_PERIPHERAL,
-		.source_data_size = 2,
-		.dest_data_size = 2,
-		.source_burst_length = 1,
-		.dest_burst_length = 1,
-		.block_count = 1,
-		.head_block = &block,
-		.dma_slot = RPI_PICO_DMA_SLOT_PWM_WRAP6,
-		.dma_callback = dma_done,
-	};
-
-	dma_config(dma_dev, dma_channel, &cfg);
-	dma_start(dma_dev, dma_channel);
+	dma_block.dest_address = (uintptr_t)cc_half;
+	arm_next_buffer(0);
 
 	printk("mod player running (buzzer/PWM)\n");
 	int64_t next_report = k_uptime_get() + 1000;
-	uint32_t last_irq_count = 0;
+	uint32_t watch_irq_count = dma_irq_count;
+	int64_t watch_irq_time = k_uptime_get();
 
 	while (1) {
 		/* Woken by dma_done() (or times out - not otherwise fatal) so
@@ -390,6 +411,48 @@ int main(void)
 			}
 		}
 
+		/* Safety net: a buffer takes ~5.3ms, so 50ms without a single
+		 * DMA IRQ means the chain is stuck. Dump the raw state (CTRL
+		 * bit 24 = BUSY, bit 0 = EN, bits 29..31 = error flags; PWM CSR
+		 * bit 0 = slice enabled), abort, and restart from the next
+		 * buffer as if dma_done() had run. dma_restarts should stay 0
+		 * with the arm_next_buffer() fix - if it doesn't, the stall has
+		 * another cause, but playback recovers either way.
+		 */
+		if (dma_irq_count != watch_irq_count) {
+			watch_irq_count = dma_irq_count;
+			watch_irq_time = k_uptime_get();
+		} else if (k_uptime_get() - watch_irq_time > 50) {
+			printk("  DMA STALL: ctrl=%08x count=%u read=%08x "
+			       "inte0=%08x intr=%08x pwm_csr=%08x pwm_ctr=%u - restarting\n",
+			       dma_hw->ch[dma_channel].al1_ctrl,
+			       dma_hw->ch[dma_channel].transfer_count,
+			       dma_hw->ch[dma_channel].read_addr,
+			       dma_hw->inte0, dma_hw->intr,
+			       pwm_hw->slice[PWM_SLICE].csr,
+			       pwm_hw->slice[PWM_SLICE].ctr);
+
+			unsigned int key = irq_lock();
+
+			/* Re-check under the lock: dma_done() may have fired
+			 * since the check above, re-arming a healthy transfer
+			 * that must not be aborted.
+			 */
+			if (dma_irq_count == watch_irq_count) {
+				dma_stop(dma_dev, dma_channel);
+				while (dma_hw->abort & BIT(dma_channel)) {
+				}
+				uint32_t next = consumed + 1;
+
+				arm_next_buffer(next);
+				consumed = next;
+				dma_restart_count++;
+			}
+			irq_unlock(key);
+			k_sem_give(&fill_needed_sem);
+			watch_irq_time = k_uptime_get();
+		}
+
 		while ((int32_t)(consumed + 2 - filled) > 0) {
 			fill_buffer(buf[filled & 1]);
 			barrier_dmem_fence_full();
@@ -402,27 +465,12 @@ int main(void)
 		 */
 		if (k_uptime_get() >= next_report) {
 			printk("song=%u pos=%d row=%d underruns=%u dma_irqs=%u dma_errs=%u(%d) "
-			       "spec_loops=%u oled_errs=%u(%d)\n",
+			       "dma_restarts=%u spec_loops=%u oled_errs=%u(%d)\n",
 			       (unsigned)song_idx + 1,
 			       player.current_position, player.current_row,
 			       underrun_count, dma_irq_count, dma_error_count,
-			       dma_last_error, spectrum_loops, oled_errors,
-			       oled_last_error);
-			if (dma_irq_count == last_irq_count) {
-				/* DMA chain stalled - dump raw state. CTRL bit 24 =
-				 * BUSY, bit 0 = EN, bits 29..31 = READ/WRITE/AHB error.
-				 * PWM CSR bit 0 = slice enabled.
-				 */
-				printk("  STALL: ctrl=%08x count=%u read=%08x "
-				       "inte0=%08x intr=%08x pwm_csr=%08x pwm_ctr=%u\n",
-				       dma_hw->ch[dma_channel].al1_ctrl,
-				       dma_hw->ch[dma_channel].transfer_count,
-				       dma_hw->ch[dma_channel].read_addr,
-				       dma_hw->inte0, dma_hw->intr,
-				       pwm_hw->slice[PWM_SLICE].csr,
-				       pwm_hw->slice[PWM_SLICE].ctr);
-			}
-			last_irq_count = dma_irq_count;
+			       dma_last_error, dma_restart_count, spectrum_loops,
+			       oled_errors, oled_last_error);
 			next_report += 1000;
 		}
 	}
