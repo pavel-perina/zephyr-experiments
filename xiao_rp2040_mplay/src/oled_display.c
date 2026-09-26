@@ -1,4 +1,5 @@
 #include <errno.h>
+#include <string.h>
 #include <zephyr/device.h>
 #include <zephyr/drivers/display.h>
 
@@ -55,6 +56,7 @@ int oled_display_init(void)
  * render thread win whenever it has work, regardless of how long this
  * thread blocks. So this pushes the whole frame in one call again.
  */
+
 static void set_pixel_row(int y, int x0, int x_end)
 {
 	int page = y >> 3;
@@ -63,6 +65,43 @@ static void set_pixel_row(int y, int x0, int x_end)
 	for (int x = x0; x < x_end; x++) {
 		frame[page * OLED_WIDTH + x] |= bit;
 	}
+}
+
+int oled_draw_trace(const uint8_t *ys, int n)
+{
+	if (!disp_dev) {
+		return -ENODEV;
+	}
+
+	memset(frame, 0, sizeof(frame));
+
+	/* Dotted centre line as the zero reference. */
+	for (int x = 0; x < OLED_WIDTH; x += 4) {
+		set_pixel_row(OLED_HEIGHT / 2, x, x + 1);
+	}
+
+	if (n > OLED_WIDTH) {
+		n = OLED_WIDTH;
+	}
+	for (int x = 0; x < n; x++) {
+		/* Join to the previous column with a vertical span, so steep
+		 * edges stay a continuous line instead of scattered dots.
+		 */
+		int y0 = ys[x];
+		int y1 = (x > 0) ? ys[x - 1] : y0;
+
+		if (y0 > y1) {
+			int t = y0;
+
+			y0 = y1;
+			y1 = t;
+		}
+		for (int y = y0; y <= y1 && y < OLED_HEIGHT; y++) {
+			set_pixel_row(y, x, x + 1);
+		}
+	}
+
+	return push_frame();
 }
 
 int oled_draw_bars(const uint8_t *heights, const uint8_t *peaks, int n_bars, uint8_t max_height)

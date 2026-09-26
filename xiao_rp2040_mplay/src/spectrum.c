@@ -194,6 +194,20 @@ void spectrum_set_mode(enum spectrum_mode mode)
 	requested_mode = mode;
 }
 
+const char *spectrum_mode_name(enum spectrum_mode mode)
+{
+	switch (mode) {
+	case SPECTRUM_MODE_FINE:
+		return "fine";
+	case SPECTRUM_MODE_WIDE:
+		return "wide";
+	case SPECTRUM_MODE_SCOPE:
+		return "scope";
+	default:
+		return "?";
+	}
+}
+
 enum spectrum_mode spectrum_get_mode(void)
 {
 	return requested_mode;
@@ -204,7 +218,7 @@ int spectrum_band_count(void)
 	return (active_mode == SPECTRUM_MODE_WIDE) ? SPECTRUM_WIDE_BANDS : SPECTRUM_BANDS;
 }
 
-void spectrum_process(void)
+enum spectrum_mode spectrum_process(void)
 {
 	enum spectrum_mode mode = requested_mode;
 
@@ -212,6 +226,10 @@ void spectrum_process(void)
 		memset(envelope, 0, sizeof(envelope));
 		memset(peak_q8, 0, sizeof(peak_q8));
 		active_mode = mode;
+	}
+
+	if (mode == SPECTRUM_MODE_SCOPE) {
+		return mode;   /* scope reads the ring directly - no FFT needed */
 	}
 
 	fft_q15();
@@ -242,6 +260,8 @@ void spectrum_process(void)
 
 		envelope[i] += (int32_t)(((int64_t)alpha * (mag - envelope[i])) >> 14);
 	}
+
+	return mode;
 }
 
 void spectrum_get_raw_envelope(int32_t *out)
@@ -325,5 +345,60 @@ void spectrum_get_levels(uint8_t *out, uint8_t *peaks, uint8_t max_value)
 		if (peaks) {
 			peaks[i] = (uint8_t)(peak_q8[i] >> 8);
 		}
+	}
+}
+
+/* Scope: 2 decimated (16kHz) samples per pixel column -> a 128px trace
+ * spans 256 samples = 16ms. SCOPE_GAIN maps +-32768/SCOPE_GAIN to the full
+ * half-height: measured over mods/ (tools/, same host build as the
+ * spectrum calibration), |sample| p99 = 14.7k and p99.9 = 20.3k, so gain 2
+ * (+-16384 = full height) fills the screen with only the loudest peaks
+ * clipped at the edge.
+ */
+#define SCOPE_STEP 2
+#define SCOPE_GAIN 2
+
+void spectrum_get_scope(uint8_t *ys, int width, int height)
+{
+	/* Snapshot the ring oldest -> newest. The render thread keeps
+	 * writing meanwhile, so the snapshot may tear by a few samples -
+	 * harmless for a display, same relaxed rule as the FFT's copy.
+	 */
+	static int16_t snap[FFT_N];
+	size_t pos = ring_pos;
+
+	for (int k = 0; k < FFT_N; k++) {
+		snap[k] = ring[(pos + k) % FFT_N];
+	}
+
+	int span = width * SCOPE_STEP;
+
+	if (span > FFT_N) {
+		span = FFT_N;
+	}
+
+	/* Latest rising zero crossing with a full window after it. */
+	int start = FFT_N - span;
+
+	for (int i = FFT_N - span; i > 0; i--) {
+		if (snap[i - 1] < 0 && snap[i] >= 0) {
+			start = i;
+			break;
+		}
+	}
+
+	int half = height / 2;
+
+	for (int x = 0; x < width; x++) {
+		int idx = start + x * SCOPE_STEP;
+		int32_t s = (idx < FFT_N) ? snap[idx] : 0;
+		int32_t y = half - (s * SCOPE_GAIN * half) / 32768;
+
+		if (y < 0) {
+			y = 0;
+		} else if (y > height - 1) {
+			y = height - 1;
+		}
+		ys[x] = (uint8_t)y;
 	}
 }

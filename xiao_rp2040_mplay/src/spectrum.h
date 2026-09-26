@@ -8,16 +8,21 @@
 #define SPECTRUM_WIDE_BANDS 32    /* wide layout; must match fft_coeffs.h's --wide-bands */
 #define SPECTRUM_MAX_BANDS  SPECTRUM_BANDS   /* size for per-band output arrays */
 
-/* Two display layouts over the same 512-point FFT:
+/* Display modes - two spectrum layouts over the same 512-point FFT, plus an
+ * oscilloscope:
  *  - FINE: 128 one-pixel bars, each a single nearest FFT bin, linear
  *    amplitude. Lots of low-end detail; noisy, sparse highs.
  *  - WIDE: Winamp-style - 32 bars (3px + 1px gap) with log-spaced edges,
  *    each the max over its whole bin range, log (dB) amplitude and falling
  *    peak dots. Hi-hats/cymbals actually show up.
+ *  - SCOPE: Winamp-style oscilloscope of the mono mix, triggered on a
+ *    rising zero crossing so the trace stands still. No FFT in this mode.
  */
 enum spectrum_mode {
 	SPECTRUM_MODE_FINE,
 	SPECTRUM_MODE_WIDE,
+	SPECTRUM_MODE_SCOPE,
+	SPECTRUM_MODE_COUNT
 };
 
 /* Build-time default - override with e.g. -DSPECTRUM_DEFAULT_MODE=SPECTRUM_MODE_FINE,
@@ -32,6 +37,9 @@ enum spectrum_mode {
  */
 void spectrum_set_mode(enum spectrum_mode mode);
 enum spectrum_mode spectrum_get_mode(void);
+
+/* Short lowercase name ("fine", "wide", "scope") for logging. */
+const char *spectrum_mode_name(enum spectrum_mode mode);
 
 /* Bars in the layout spectrum_process() last ran (SPECTRUM_BANDS or
  * SPECTRUM_WIDE_BANDS) - how many entries spectrum_get_levels() fills.
@@ -52,8 +60,12 @@ void spectrum_accumulate(const int16_t *samples, size_t n);
  * thread - call this from its own lower-priority thread instead (see
  * main.c), on whatever cadence makes sense for how often the display
  * should actually update.
+ *
+ * Applies any pending spectrum_set_mode() first and returns the mode it
+ * ran - the caller draws with spectrum_get_levels() for FINE/WIDE, or
+ * spectrum_get_scope() for SCOPE (where the FFT is skipped).
  */
-void spectrum_process(void);
+enum spectrum_mode spectrum_process(void);
 
 /* Fills out[0..spectrum_band_count()-1] with each band's current envelope,
  * scaled to 0..max_value (inclusive) - e.g. max_value = OLED bar height in
@@ -62,6 +74,13 @@ void spectrum_process(void);
  * advances the peak dots' fall.
  */
 void spectrum_get_levels(uint8_t *out, uint8_t *peaks, uint8_t max_value);
+
+/* Oscilloscope trace of the most recent mix samples: ys[0..width-1] get a
+ * row (0 = top .. height-1 = bottom) per column, centred at height/2,
+ * starting at the latest rising zero crossing that still leaves a full
+ * window after it (free-running if there's none).
+ */
+void spectrum_get_scope(uint8_t *ys, int width, int height);
 
 /* Raw, unscaled per-band envelope values (roughly int16-ish range - the
  * FFT's |re|+|im| magnitude approximation, smoothed) - diagnostic/

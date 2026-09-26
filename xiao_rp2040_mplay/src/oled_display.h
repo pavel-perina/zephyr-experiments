@@ -24,4 +24,10 @@ int oled_display_init(void);
  */
 int oled_draw_bars(const uint8_t *heights, const uint8_t *peaks, int n_bars, uint8_t max_height);
 
+/* Oscilloscope frame: ys[x] (row, 0 = top) for x = 0..n-1, consecutive
+ * points joined by vertical spans, plus a dotted centre line. Same
+ * one-call full-frame push as oled_draw_bars().
+ */
+int oled_draw_trace(const uint8_t *ys, int n);
+
 #endif

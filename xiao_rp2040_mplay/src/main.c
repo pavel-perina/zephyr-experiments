@@ -98,7 +98,7 @@ static size_t song_idx;
  *    flag: switching songs reinitialises `player`, which must happen in
  *    main()'s render thread between fill_buffer() calls, never concurrently
  *    with one.
- *  - long press: toggles the spectrum layout (fine <-> wide) as soon as
+ *  - long press: cycles the display (fine -> wide -> scope) as soon as
  *    LONG_PRESS_MS elapses, while still held - no need to guess when to
  *    let go. spectrum_set_mode() is safe from any thread.
  *
@@ -117,12 +117,10 @@ static void long_press_handler(struct k_work *work)
 {
 	ARG_UNUSED(work);
 	if (atomic_cas(&button_state, BTN_PRESSED, BTN_LONG)) {
-		enum spectrum_mode mode = spectrum_get_mode() == SPECTRUM_MODE_WIDE
-						  ? SPECTRUM_MODE_FINE
-						  : SPECTRUM_MODE_WIDE;
+		enum spectrum_mode mode = (spectrum_get_mode() + 1) % SPECTRUM_MODE_COUNT;
 
 		spectrum_set_mode(mode);
-		printk("spectrum: %s\n", mode == SPECTRUM_MODE_WIDE ? "wide" : "fine");
+		printk("display: %s\n", spectrum_mode_name(mode));
 	}
 }
 static K_WORK_DELAYABLE_DEFINE(long_press_work, long_press_handler);
@@ -295,6 +293,10 @@ static void dma_done(const struct device *dev, void *user_data, uint32_t channel
  */
 #define SPECTRUM_BAR_MAX 64
 
+/* Oscilloscope trace size - the whole OLED. */
+#define SCOPE_WIDTH  128
+#define SCOPE_HEIGHT 64
+
 /* The FFT (spectrum_process()) and the OLED push (oled_draw_bars()) are
  * both too slow for the render thread's ~5.33ms/buffer budget - this
  * thread does them on its own schedule instead, decoupled from audio
@@ -311,14 +313,21 @@ static void spectrum_thread(void *p1, void *p2, void *p3)
 	ARG_UNUSED(p3);
 
 	while (1) {
-		spectrum_process();
+		int ret;
 
-		uint8_t bar_heights[SPECTRUM_MAX_BANDS];
-		uint8_t bar_peaks[SPECTRUM_MAX_BANDS];
+		if (spectrum_process() == SPECTRUM_MODE_SCOPE) {
+			uint8_t ys[SCOPE_WIDTH];
 
-		spectrum_get_levels(bar_heights, bar_peaks, SPECTRUM_BAR_MAX);
-		int ret = oled_draw_bars(bar_heights, bar_peaks, spectrum_band_count(),
-					 SPECTRUM_BAR_MAX);
+			spectrum_get_scope(ys, SCOPE_WIDTH, SCOPE_HEIGHT);
+			ret = oled_draw_trace(ys, SCOPE_WIDTH);
+		} else {
+			uint8_t bar_heights[SPECTRUM_MAX_BANDS];
+			uint8_t bar_peaks[SPECTRUM_MAX_BANDS];
+
+			spectrum_get_levels(bar_heights, bar_peaks, SPECTRUM_BAR_MAX);
+			ret = oled_draw_bars(bar_heights, bar_peaks, spectrum_band_count(),
+					     SPECTRUM_BAR_MAX);
+		}
 
 		if (ret != 0) {
 			oled_errors++;
