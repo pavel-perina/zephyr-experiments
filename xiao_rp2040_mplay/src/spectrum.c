@@ -6,6 +6,8 @@
 _Static_assert(FFT_BANDS == SPECTRUM_BANDS, "regenerate fft_coeffs.h: --bands must match SPECTRUM_BANDS");
 _Static_assert(FFT_WIDE_BANDS == SPECTRUM_WIDE_BANDS,
 	       "regenerate fft_coeffs.h: --wide-bands must match SPECTRUM_WIDE_BANDS");
+_Static_assert(FFT_HIRES_BANDS == SPECTRUM_HIRES_BANDS,
+	       "regenerate fft_coeffs.h: --hires-bands must match SPECTRUM_HIRES_BANDS");
 
 /* 512-point version of the earlier 64-point-every-buffer FFT (see git
  * history for that one, and the 16-band IIR bank before it). A bigger FFT
@@ -58,7 +60,7 @@ static enum spectrum_mode active_mode = SPECTRUM_DEFAULT_MODE;
 /* Wide mode's falling peak dots, Q8.8 pixels (so they can fall by
  * fractions of a pixel per frame).
  */
-static int32_t peak_q8[SPECTRUM_WIDE_BANDS];
+static int32_t peak_q8[SPECTRUM_MAX_BANDS];
 
 /* These were tuned for the old cadence - envelope smoothed once per audio
  * buffer, ~188Hz (5.33ms/step) - and left unchanged when spectrum_process()
@@ -83,21 +85,51 @@ static int32_t peak_q8[SPECTRUM_WIDE_BANDS];
  */
 #define ENVELOPE_MAX 5000
 
-/* Wide mode's log (dB) amplitude scale, in log2_q4() units (1/16 of an
- * octave of amplitude = ~0.38dB), applied after the tilt below:
- * LOG_TOP_Q4 maps to a full-height bar, LOG_RANGE_Q4 below that to an
- * empty one. Calibrated with tools/spectrum_calibrate.c over all nine
- * songs in mods/ (tilted values, every band and 40ms frame): p10=127,
- * p50=160, p90=184, p99=201, p99.9=214. So the top sits between p99 and
- * p99.9 (loud bands touch it now and then, Winamp-style bouncing) and a
- * ~30dB range puts the floor right at p10 (quiet passages drop to empty).
+/* Range layouts (WIDE, HIRES): each band is the max over a bin range,
+ * shown on a log (dB) amplitude scale in log2_q4() units (1/16 of an
+ * octave of amplitude = ~0.38dB), after the tilt below: top_q4 maps to a
+ * full-height bar, range_q4 below that to an empty one.
+ *
+ * Calibrated with tools/spectrum_calibrate.c over all nine songs in mods/
+ * (tilted values, every band and 40ms frame), top between p99 and p99.9
+ * (loud bands touch it now and then, Winamp-style bouncing), ~30dB range
+ * putting the floor near p10 (quiet passages drop to empty):
+ *  - WIDE:  p10=127 p50=160 p90=184 p99=201 p99.9=214
+ *  - HIRES: p10=121 p50=153 p90=178 p99=197 p99.9=210 (narrower bands take
+ *    the max over fewer bins, so slightly lower overall than WIDE)
  */
-#ifndef LOG_TOP_Q4
-#define LOG_TOP_Q4   205
-#endif
-#ifndef LOG_RANGE_Q4
-#define LOG_RANGE_Q4 80    /* ~30dB: 80 / 16 octaves * 6.02dB */
-#endif
+struct range_layout {
+	int n;
+	const uint16_t *lo;
+	const uint16_t *hi;
+	const uint16_t *oct_q8;
+	int32_t top_q4;
+	int32_t range_q4;
+};
+
+#define WIDE_TOP_Q4    205
+#define HIRES_TOP_Q4   201
+#define LOG_RANGE_Q4   80    /* ~30dB: 80 / 16 octaves * 6.02dB */
+
+static const struct range_layout wide_layout = {
+	SPECTRUM_WIDE_BANDS, fft_wide_lo, fft_wide_hi, fft_wide_oct_q8, WIDE_TOP_Q4, LOG_RANGE_Q4,
+};
+static const struct range_layout hires_layout = {
+	SPECTRUM_HIRES_BANDS, fft_hires_lo, fft_hires_hi, fft_hires_oct_q8, HIRES_TOP_Q4, LOG_RANGE_Q4,
+};
+
+/* The range layout for `mode`, or NULL for FINE/SCOPE. */
+static const struct range_layout *range_layout_for(enum spectrum_mode mode)
+{
+	switch (mode) {
+	case SPECTRUM_MODE_WIDE:
+		return &wide_layout;
+	case SPECTRUM_MODE_HIRES:
+		return &hires_layout;
+	default:
+		return NULL;
+	}
+}
 
 /* Wide mode's tilt compensation, in log2_q4() units per octave above the
  * lowest band (8 = half an octave of amplitude = ~3dB/octave). Music's
@@ -201,6 +233,8 @@ const char *spectrum_mode_name(enum spectrum_mode mode)
 		return "fine";
 	case SPECTRUM_MODE_WIDE:
 		return "wide";
+	case SPECTRUM_MODE_HIRES:
+		return "hires";
 	case SPECTRUM_MODE_SCOPE:
 		return "scope";
 	default:
@@ -215,7 +249,9 @@ enum spectrum_mode spectrum_get_mode(void)
 
 int spectrum_band_count(void)
 {
-	return (active_mode == SPECTRUM_MODE_WIDE) ? SPECTRUM_WIDE_BANDS : SPECTRUM_BANDS;
+	const struct range_layout *rl = range_layout_for(active_mode);
+
+	return rl ? rl->n : SPECTRUM_BANDS;
 }
 
 enum spectrum_mode spectrum_process(void)
@@ -235,17 +271,18 @@ enum spectrum_mode spectrum_process(void)
 	fft_q15();
 
 	int n = spectrum_band_count();
+	const struct range_layout *rl = range_layout_for(mode);
 
 	for (int i = 0; i < n; i++) {
 		int32_t mag;
 
-		if (mode == SPECTRUM_MODE_WIDE) {
+		if (rl) {
 			/* Max over the band's whole bin range, not one bin:
 			 * noise-like content (hi-hats) is spread across many
 			 * bins, so any single one catches only a fraction.
 			 */
 			mag = 0;
-			for (int bin = fft_wide_lo[i]; bin <= fft_wide_hi[i]; bin++) {
+			for (int bin = rl->lo[i]; bin <= rl->hi[i]; bin++) {
 				int32_t m = bin_mag(bin);
 
 				if (m > mag) {
@@ -293,13 +330,13 @@ static int32_t log2_q4(uint32_t v)
 	return msb * 16 + (int32_t)(frac & 15);
 }
 
-/* Wide band i's displayed level on the log scale, before mapping to
- * pixels: log2 of its envelope plus the tilt for its octave.
+/* Range-layout band i's displayed level on the log scale, before mapping
+ * to pixels: log2 of its envelope plus the tilt for its octave.
  */
-static int32_t wide_log_q4(int i)
+static int32_t range_log_q4(const struct range_layout *rl, int i)
 {
 	return log2_q4((uint32_t)envelope[i]) +
-	       (((int32_t)fft_wide_oct_q8[i] * TILT_Q4_PER_OCT) >> 8);
+	       (((int32_t)rl->oct_q8[i] * TILT_Q4_PER_OCT) >> 8);
 }
 
 static uint8_t clamp_level(int32_t v, uint8_t max_value)
@@ -313,9 +350,10 @@ static uint8_t clamp_level(int32_t v, uint8_t max_value)
 void spectrum_get_levels(uint8_t *out, uint8_t *peaks, uint8_t max_value)
 {
 	int n = spectrum_band_count();
+	const struct range_layout *rl = range_layout_for(active_mode);
 
 	for (int i = 0; i < n; i++) {
-		if (active_mode != SPECTRUM_MODE_WIDE) {
+		if (!rl) {
 			out[i] = clamp_level((envelope[i] * (int32_t)max_value) / ENVELOPE_MAX,
 					     max_value);
 			if (peaks) {
@@ -324,8 +362,8 @@ void spectrum_get_levels(uint8_t *out, uint8_t *peaks, uint8_t max_value)
 			continue;
 		}
 
-		int32_t db = wide_log_q4(i) - (LOG_TOP_Q4 - LOG_RANGE_Q4);
-		uint8_t level = clamp_level((db * max_value) / LOG_RANGE_Q4, max_value);
+		int32_t db = range_log_q4(rl, i) - (rl->top_q4 - rl->range_q4);
+		uint8_t level = clamp_level((db * max_value) / rl->range_q4, max_value);
 
 		out[i] = level;
 

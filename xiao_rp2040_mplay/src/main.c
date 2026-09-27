@@ -98,7 +98,7 @@ static size_t song_idx;
  *    flag: switching songs reinitialises `player`, which must happen in
  *    main()'s render thread between fill_buffer() calls, never concurrently
  *    with one.
- *  - long press: cycles the display (fine -> wide -> scope) as soon as
+ *  - long press: cycles the display (fine -> wide -> hires -> scope) as soon as
  *    LONG_PRESS_MS elapses, while still held - no need to guess when to
  *    let go. spectrum_set_mode() is safe from any thread.
  *

@@ -122,10 +122,12 @@ static void run(const char *path, enum spectrum_mode mode)
 			spectrum_process();
 			spectrum_get_raw_envelope(env);
 			for (int i = 0; i < spectrum_band_count(); i++) {
-				if (mode == SPECTRUM_MODE_WIDE) {
+				const struct range_layout *rl = range_layout_for(mode);
+
+				if (rl) {
 					/* the value get_levels() maps to pixels */
-					push(wide_log_q4(i));
-					push_band(i, wide_log_q4(i));
+					push(range_log_q4(rl, i));
+					push_band(i, range_log_q4(rl, i));
 				} else {
 					push(env[i]);
 				}
@@ -141,28 +143,36 @@ int main(int argc, char **argv)
 		fprintf(stderr, "usage: %s file.mod...\n", argv[0]);
 		return 1;
 	}
-	for (int m = 0; m < 2; m++) {
-		enum spectrum_mode mode = m ? SPECTRUM_MODE_WIDE : SPECTRUM_MODE_FINE;
+	static const enum spectrum_mode modes[] = {
+		SPECTRUM_MODE_FINE, SPECTRUM_MODE_WIDE, SPECTRUM_MODE_HIRES,
+	};
 
+	for (size_t m = 0; m < sizeof(modes) / sizeof(modes[0]); m++) {
+		const struct range_layout *rl = range_layout_for(modes[m]);
+
+		memset(band_n, 0, sizeof(band_n));
 		for (int i = 1; i < argc; i++) {
-			run(argv[i], mode);
+			run(argv[i], modes[m]);
 		}
-		report(m ? "wide" : "fine");
-	}
+		report(spectrum_mode_name(modes[m]));
+		if (!rl) {
+			continue;
+		}
 
-	/* Wide layout, per band: median and p90 in log2_q4 units - shows
-	 * whether the top (hi-hat) bands actually carry visible energy.
-	 */
-	printf("wide per band (tilted log2_q4 p50/p90):\n");
-	for (int b = 0; b < SPECTRUM_WIDE_BANDS; b++) {
-		qsort(band_vals[b], band_n[b], sizeof(int32_t), cmp_int32);
-		int32_t p50 = band_vals[b][band_n[b] / 2];
-		int32_t p90 = band_vals[b][band_n[b] * 9 / 10];
+		/* Per band: median and p90 in tilted log2_q4 units - shows
+		 * whether the top (hi-hat) bands actually carry visible
+		 * energy, and how flat the tilt leaves the layout.
+		 */
+		printf("%s per band (tilted log2_q4 p50/p90):\n", spectrum_mode_name(modes[m]));
+		for (int b = 0; b < rl->n; b++) {
+			qsort(band_vals[b], band_n[b], sizeof(int32_t), cmp_int32);
+			int32_t p50 = band_vals[b][band_n[b] / 2];
+			int32_t p90 = band_vals[b][band_n[b] * 9 / 10];
 
-		printf("  %2d %5u-%5uHz  %3d/%3d\n", b,
-		       (unsigned)(fft_wide_lo[b] * 16000u / FFT_N),
-		       (unsigned)((fft_wide_hi[b] + 1) * 16000u / FFT_N),
-		       p50, p90);
+			printf("  %2d %5u-%5uHz  %3d/%3d\n", b,
+			       (unsigned)(rl->lo[b] * 16000u / FFT_N),
+			       (unsigned)((rl->hi[b] + 1) * 16000u / FFT_N), p50, p90);
+		}
 	}
 	return 0;
 }

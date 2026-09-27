@@ -6,6 +6,7 @@
 
 #define SPECTRUM_BANDS      128   /* fine layout; must match fft_coeffs.h's --bands */
 #define SPECTRUM_WIDE_BANDS 32    /* wide layout; must match fft_coeffs.h's --wide-bands */
+#define SPECTRUM_HIRES_BANDS 64   /* hires layout; must match fft_coeffs.h's --hires-bands */
 #define SPECTRUM_MAX_BANDS  SPECTRUM_BANDS   /* size for per-band output arrays */
 
 /* Display modes - two spectrum layouts over the same 512-point FFT, plus an
@@ -15,12 +16,16 @@
  *  - WIDE: Winamp-style - 32 bars (3px + 1px gap) with log-spaced edges,
  *    each the max over its whole bin range, log (dB) amplitude and falling
  *    peak dots. Hi-hats/cymbals actually show up.
+ *  - HIRES: WIDE's treatment (bin-range max, log, tilt, peak dots) at 64
+ *    bars (1px + 1px gap) - twice the resolution. Below ~1.3kHz each bar
+ *    is a single FFT bin (the 31.25Hz bin spacing is the limit there).
  *  - SCOPE: Winamp-style oscilloscope of the mono mix, triggered on a
  *    rising zero crossing so the trace stands still. No FFT in this mode.
  */
 enum spectrum_mode {
 	SPECTRUM_MODE_FINE,
 	SPECTRUM_MODE_WIDE,
+	SPECTRUM_MODE_HIRES,
 	SPECTRUM_MODE_SCOPE,
 	SPECTRUM_MODE_COUNT
 };
@@ -42,7 +47,7 @@ enum spectrum_mode spectrum_get_mode(void);
 const char *spectrum_mode_name(enum spectrum_mode mode);
 
 /* Bars in the layout spectrum_process() last ran (SPECTRUM_BANDS or
- * SPECTRUM_WIDE_BANDS) - how many entries spectrum_get_levels() fills.
+ * a range layout's count) - how many entries spectrum_get_levels() fills.
  */
 int spectrum_band_count(void);
 
@@ -62,7 +67,7 @@ void spectrum_accumulate(const int16_t *samples, size_t n);
  * should actually update.
  *
  * Applies any pending spectrum_set_mode() first and returns the mode it
- * ran - the caller draws with spectrum_get_levels() for FINE/WIDE, or
+ * ran - the caller draws with spectrum_get_levels() for the bar modes, or
  * spectrum_get_scope() for SCOPE (where the FFT is skipped).
  */
 enum spectrum_mode spectrum_process(void);
