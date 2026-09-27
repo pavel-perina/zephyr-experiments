@@ -68,6 +68,10 @@ struct Channel {
     // One-pole low-pass filter state (Amiga RC/LED filter emulation),
     // Q(24).8 fixed point - same "no FPU on RP2040" reasoning as position.
     int32_t filter_state;
+    // Stereo position, 0 = hard left .. 255 = hard right. Default: Amiga's
+    // L R R L softened to 48/207 (as mplay-rs), overridden by 8xx / E8x -
+    // see mod_mix_stereo().
+    uint8_t pan;
 };
 
 struct PlayerState {
@@ -113,6 +117,14 @@ struct PlayerState {
     // to the start (end of the order list, or a jump back to a row already
     // played) - lets a playlist caller advance instead of looping forever.
     uint32_t restarts;
+
+    // Mixer-side (tier 2) setting, not song state: bit ch set = channel ch
+    // left out of mod_mix_stereo()/mod_mix_mono() (and so mod_player_
+    // produce()). Muted channels still play internally - effects, position
+    // and their mod_player_render() output all continue - so unmuting is
+    // seamless and visualizers can still show them. Cleared by
+    // mod_player_init().
+    uint8_t mute_mask;
     bool visited[128 * MOD_ROWS_PER_PATTERN];
 };
 
@@ -121,8 +133,40 @@ struct PlayerState {
 // data extending past the end of the buffer).
 int mod_player_init(struct PlayerState *ps, const uint8_t *mod_data, size_t mod_size);
 
-// Renders exactly `n` mono 16-bit samples at 48 kHz, advancing playback
-// state as needed - including across tick/row/pattern boundaries within a
-// single call, and looping back to the start of the song when it ends.
-// `n` does not need to align with tick or row boundaries in any way.
+// --- Tier 1: per-channel rendering ------------------------------------------
+//
+// Renders exactly `n` samples at 48 kHz for every channel separately into
+// ch[0..MOD_NUM_CHANNELS-1][0..n-1], advancing playback state as needed -
+// including across tick/row/pattern boundaries within a single call, and
+// looping back to the start of the song when it ends (ps->restarts counts
+// that). `n` does not need to align with tick or row boundaries in any way.
+//
+// Each sample is the channel's output after volume and the Amiga-style
+// low-pass filter, in the mixer's internal fixed-point format: 8-bit sample
+// units in Q.8, i.e. roughly -32768..32767 for a full-volume, full-scale
+// channel (MOD_CHANNEL_FRAC_BITS fractional bits). Kept at full precision
+// (int32, not int16) so mixing them afterwards is bit-exact with the old
+// all-in-one mixer.
+#define MOD_CHANNEL_FRAC_BITS 8
+void mod_player_render(struct PlayerState *ps, int32_t *const ch[MOD_NUM_CHANNELS], int n);
+
+// --- Tier 2: mixers ----------------------------------------------------------
+//
+// Mix n samples of mod_player_render() output down to 16-bit PCM, honouring
+// each channel's pan (ps->channels[ch].pan) and ps->mute_mask. Pan is linear:
+// weights (256 - p) and p, p = 0..256, always summing to 256 - so
+// mod_mix_mono() is literally the sum of mod_mix_stereo()'s two
+// accumulators (before scaling/clamping), and bit-identical to the old mono
+// mixer. Pan is read once per call, so an 8xx mid-buffer takes effect at
+// the next call (one buffer, ~5ms at 256 samples).
+void mod_mix_stereo(const struct PlayerState *ps, const int32_t *const ch[MOD_NUM_CHANNELS],
+                    int16_t *left, int16_t *right, int n);
+void mod_mix_mono(const struct PlayerState *ps, const int32_t *const ch[MOD_NUM_CHANNELS],
+                  int16_t *out, int n);
+
+// --- Convenience: the original one-call API ----------------------------------
+//
+// Renders exactly `n` mono 16-bit samples: mod_player_render() +
+// mod_mix_mono() in small chunks on the stack (no allocation, any `n`).
+// Output is bit-identical to the pre-split mixer.
 void mod_player_produce(struct PlayerState *ps, int16_t *out, int n);

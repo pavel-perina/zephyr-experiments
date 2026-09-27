@@ -47,7 +47,8 @@ _Static_assert(sizeof(struct ModHeader) == 1084, "ModHeader must be 1084 bytes")
 #define DEFAULT_TEMPO    125
 #define MIN_PERIOD       56
 #define MAX_PERIOD       1712
-#define MIX_SCALE        64    // 8->16 bit output scale; lower = quieter overall (was 128)
+#define MIX_SCALE_SHIFT  6     // 8->16 bit output scale, as a shift: 1 << 6 = 64
+#define MIX_SCALE        (1 << MIX_SCALE_SHIFT)   // lower = quieter overall (was 128)
 #define FILTER_CUTOFF_HZ 4500.0f   // Amiga-style low-pass cutoff, matches mplay-rs's DEFAULT_FILTER_HZ
 
 #ifndef M_PI
@@ -136,6 +137,19 @@ static uint16_t apply_finetune(uint16_t period, int8_t finetune) {
     if (finetune == 0 || period == 0) return period;
     // finetune is -8..+7, each step is 1/8 semitone = 1/96 octave
     return (uint16_t)(period * powf(2.0f, -(float)finetune / 96.0f) + 0.5f);
+}
+
+// Amiga Paula's L R R L channel layout, softened from its fully hard
+// panning (melody in one ear, drums in the other - harsh on headphones).
+// Same values as mplay-rs's default_panning(): 48/207, i.e. about 81/19
+// with this mixer's weights (its comment and doc/writing-a-mod-player.md
+// say "~70/30", which would be ~77/178). Mono output doesn't depend on
+// pan at all (weights always sum to 256).
+static const uint8_t default_pan[MOD_NUM_CHANNELS] = { 48, 207, 207, 48 };
+
+static void reset_pans(struct PlayerState *ps) {
+    for (int ch = 0; ch < NUM_CHANNELS; ++ch)
+        ps->channels[ch].pan = default_pan[ch];
 }
 
 static uint16_t swap_uint16(uint16_t value) {
@@ -239,6 +253,7 @@ int mod_player_init(struct PlayerState *ps, const uint8_t *mod_data, size_t mod_
     ps->mod_size = size;
     ps->header = hdr;
     ps->filter_alpha = filter_alpha_fp(FILTER_CUTOFF_HZ);
+    reset_pans(ps);
     ps->speed = DEFAULT_SPEED;
     ps->tempo = DEFAULT_TEMPO;
     ps->break_row = -1;
@@ -384,7 +399,9 @@ static void process_row(struct PlayerState *ps, const struct ModNote notes[MOD_N
             if ((arg >> 4) > 0) c->tremolo_speed = arg >> 4;
             if ((arg & 0x0f) > 0) c->tremolo_depth = arg & 0x0f;
             break;
-        case 0x08: // 8xx: Set panning (mono output - no-op)
+        case 0x08: // 8xx: Set panning, 00 = left .. FF = right (ignored by
+                   // ProTracker itself; used by later/multichannel trackers)
+            c->pan = arg;
             break;
         case 0x09: // 9xx: Sample offset (900 reuses last nonzero argument)
             if (arg > 0)
@@ -436,6 +453,9 @@ static void process_row(struct PlayerState *ps, const struct ModNote notes[MOD_N
                 c->volume = (v > 64) ? 64 : (uint8_t)v;
                 break;
             }
+            case 0x08: // E8y: Coarse panning, 16 steps (some players; PT ignored it)
+                c->pan = (uint8_t)(ext_arg * 17);   // 0..15 -> 0..255
+                break;
             case 0x07: // E7y: Set tremolo waveform
                 c->tremolo_waveform = ext_arg;
                 break;
@@ -555,10 +575,12 @@ static void process_tick(struct PlayerState *ps, const struct ModNote notes[MOD_
     }
 }
 
-static void render_tick(struct PlayerState *ps, int16_t *buffer, int num_samples) {
-    for (int i = 0; i < num_samples; ++i) {
-        int32_t mix = 0;   // sum of 4 channels' Q(24).8 filter_state
-
+// Renders num_samples of every channel into ch_out[ch][offset..], each the
+// channel's Q(24).8 filter_state - the mixing that used to follow here
+// (sum, scale, clamp) now lives in mod_mix_stereo()/mod_mix_mono().
+static void render_tick(struct PlayerState *ps, int32_t *const ch_out[MOD_NUM_CHANNELS],
+                        int offset, int num_samples) {
+    for (int i = offset; i < offset + num_samples; ++i) {
         for (int ch = 0; ch < NUM_CHANNELS; ++ch) {
             struct Channel *c = &ps->channels[ch];
             int32_t input = 0;   // Q(24).8, matches filter_state's format
@@ -653,16 +675,8 @@ static void render_tick(struct PlayerState *ps, int16_t *buffer, int num_samples
             // audio content, which never has input pinned at exactly 0.
             if (input == 0 && c->filter_state > -8 && c->filter_state < 8)
                 c->filter_state = 0;
-            mix += c->filter_state;
+            ch_out[ch][i] = c->filter_state;
         }
-
-        // Scale 8-bit to 16-bit (plus undo the Q.8 filter scaling); up to 4
-        // channels can still sum past full scale on loud passages, which is
-        // what the clamp below is for.
-        int32_t out = (mix * MIX_SCALE) >> FILTER_FRAC_BITS;
-        if (out > 32767) out = 32767;
-        if (out < -32768) out = -32768;
-        buffer[i] = (int16_t)out;
     }
 }
 
@@ -744,6 +758,7 @@ static void restart_song(struct PlayerState *ps) {
     // break_row directly, never call restart_song(), and correctly keep
     // channel state exactly like a real tracker would.
     memset(ps->channels, 0, sizeof(ps->channels));
+    reset_pans(ps);
     memset(ps->visited, 0, sizeof(ps->visited));
     enter_row(ps);
 }
@@ -777,7 +792,7 @@ static void advance_tick(struct PlayerState *ps) {
     enter_row(ps);
 }
 
-void mod_player_produce(struct PlayerState *ps, int16_t *out, int n) {
+void mod_player_render(struct PlayerState *ps, int32_t *const ch[MOD_NUM_CHANNELS], int n) {
     int produced = 0;
     while (produced < n) {
         if (ps->tick_samples_remaining <= 0) {
@@ -785,8 +800,91 @@ void mod_player_produce(struct PlayerState *ps, int16_t *out, int n) {
         }
         int chunk = n - produced;
         if (chunk > ps->tick_samples_remaining) chunk = ps->tick_samples_remaining;
-        render_tick(ps, out + produced, chunk);
+        render_tick(ps, ch, produced, chunk);
         ps->tick_samples_remaining -= chunk;
         produced += chunk;
+    }
+}
+
+// --- Tier 2: mixers ------------------------------------------------------------
+//
+// Both mixers share one accumulator: acc_l = sum(x * (256 - p)), acc_r =
+// sum(x * p), p = pan 0..255 stretched to 0..256 so the two weights always
+// sum to exactly 256. Hence acc_l + acc_r == 256 * sum(x) for any pans, and
+// the mono mixer below - built on that sum - reproduces the old
+// `(sum(x) * MIX_SCALE) >> FILTER_FRAC_BITS` bit for bit (MIX_SCALE is a
+// power of two, so the whole scaling is one arithmetic shift, with the same
+// floor rounding as before).
+//
+// Range: |x| <= 32768 (8-bit sample * volume 64 in Q.8), * 256, * 4
+// channels = 2^25 - no overflow in int32, and both sides together stay
+// under 2^26.
+#define PAN_ONE       256
+#define ACC_SHIFT     (8 + FILTER_FRAC_BITS - MIX_SCALE_SHIFT)   // pan Q8 + filter Q8 - scale
+
+static inline uint32_t pan_weight(uint8_t pan) {
+    return pan + (pan >> 7);   // 0..255 -> 0..256 (0 -> 0, 128 -> 129, 255 -> 256)
+}
+
+static inline int16_t clamp16(int32_t v) {
+    if (v > 32767) return 32767;
+    if (v < -32768) return -32768;
+    return (int16_t)v;
+}
+
+// Per-channel weights for this call, with muted channels zeroed.
+static void mix_weights(const struct PlayerState *ps, int32_t wl[MOD_NUM_CHANNELS],
+                        int32_t wr[MOD_NUM_CHANNELS]) {
+    for (int ch = 0; ch < NUM_CHANNELS; ++ch) {
+        int32_t r = (int32_t)pan_weight(ps->channels[ch].pan);
+        bool muted = ps->mute_mask & (1u << ch);
+        wl[ch] = muted ? 0 : PAN_ONE - r;
+        wr[ch] = muted ? 0 : r;
+    }
+}
+
+void mod_mix_stereo(const struct PlayerState *ps, const int32_t *const ch[MOD_NUM_CHANNELS],
+                    int16_t *left, int16_t *right, int n) {
+    int32_t wl[MOD_NUM_CHANNELS], wr[MOD_NUM_CHANNELS];
+    mix_weights(ps, wl, wr);
+    for (int i = 0; i < n; ++i) {
+        int32_t acc_l = 0, acc_r = 0;
+        for (int c = 0; c < NUM_CHANNELS; ++c) {
+            acc_l += ch[c][i] * wl[c];
+            acc_r += ch[c][i] * wr[c];
+        }
+        // Each side alone is at most half of what mono sums, so a
+        // hard-panned channel pair is as loud per side as the mono mix of
+        // those two - same MIX_SCALE, same clamp, no extra gain.
+        left[i] = clamp16(acc_l >> ACC_SHIFT);
+        right[i] = clamp16(acc_r >> ACC_SHIFT);
+    }
+}
+
+void mod_mix_mono(const struct PlayerState *ps, const int32_t *const ch[MOD_NUM_CHANNELS],
+                  int16_t *out, int n) {
+    int32_t wl[MOD_NUM_CHANNELS], wr[MOD_NUM_CHANNELS];
+    mix_weights(ps, wl, wr);
+    for (int i = 0; i < n; ++i) {
+        int32_t acc = 0;   // acc_l + acc_r, i.e. 256 * sum of unmuted channels
+        for (int c = 0; c < NUM_CHANNELS; ++c)
+            acc += ch[c][i] * (wl[c] + wr[c]);
+        out[i] = clamp16(acc >> ACC_SHIFT);
+    }
+}
+
+// --- Convenience: the original one-call API ------------------------------------
+
+#define PRODUCE_CHUNK 64   // 4 channels * 64 * 4 bytes = 1 KB of stack
+
+void mod_player_produce(struct PlayerState *ps, int16_t *out, int n) {
+    int32_t buf[NUM_CHANNELS][PRODUCE_CHUNK];
+    int32_t *const ch[NUM_CHANNELS] = { buf[0], buf[1], buf[2], buf[3] };
+    while (n > 0) {
+        int chunk = n < PRODUCE_CHUNK ? n : PRODUCE_CHUNK;
+        mod_player_render(ps, ch, chunk);
+        mod_mix_mono(ps, (const int32_t *const *)ch, out, chunk);
+        out += chunk;
+        n -= chunk;
     }
 }
