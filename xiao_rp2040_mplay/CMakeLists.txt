@@ -12,7 +12,10 @@ set(SHIELD seeed_xiao_expansion_board)
 find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
 project(xiao_rp2040_mplay)
 
-target_sources(app PRIVATE src/main.c src/mod_player.c src/vu_neopixel.c src/oled_display.c src/spectrum.c src/diag.c)
+target_sources(app PRIVATE src/main.c src/mod_player.c src/vu_neopixel.c src/oled_display.c src/spectrum.c src/diag.c
+               src/audio.c)
+# Audio output backend, one per SoC family - see src/audio_backend.h.
+target_sources_ifdef(CONFIG_SOC_FAMILY_RPI_PICO app PRIVATE src/audio_rp2xxx.c)
 
 # Embed the playlist as flash data, generated at build time into the build
 # directory rather than committing ~6x larger generated headers. Each MOD
