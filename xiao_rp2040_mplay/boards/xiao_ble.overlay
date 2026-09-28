@@ -1,19 +1,25 @@
 /*
  * XIAO BLE (nRF52840). The USB CDC console node comes from the board
  * definition, the buzzer pin and button debounce from
- * expansion_board.overlay - this only fixes the OLED's I2C speed.
+ * expansion_board.overlay - this only sets up the OLED's I2C bus.
  *
  * The board puts xiao_i2c on the legacy TWI peripheral with no
- * clock-frequency, i.e. the 100 kHz default: a full 1 KB OLED frame then
- * takes ~92 ms on the wire and the display ran at ~6 fps (vs ~18 on the
- * XIAO RP2040, whose board file sets 400 kHz). 400 kHz here too. Kept on
- * the legacy TWI driver: the EasyDMA TWIM one would need a >1 KB
- * zephyr,concat-buf-size, since the SSD1306 driver sends each frame as a
- * control-byte message plus a data message that must go out as one
- * transfer.
+ * clock-frequency: 100 kHz, one interrupt per byte. A full 1 KB OLED frame
+ * then took ~92 ms on the wire (~6 fps). Here:
+ *  - 400 kHz, the nRF52840's maximum (~23 ms per frame on the wire);
+ *  - TWIM, the EasyDMA variant of the same block: the whole frame goes out
+ *    as one DMA transfer instead of ~1000 byte interrupts. The SSD1306
+ *    driver sends each frame with i2c_burst_write_dt() - a 1-byte control
+ *    message plus the 1024-byte data message with no STOP between - which
+ *    the TWIM driver must merge into one transfer in its concat buffer
+ *    (default 16 bytes -> -ENOSPC), hence zephyr,concat-buf-size = 1025
+ *    (1 KB of RAM). SPI1, which shares this peripheral block, stays
+ *    disabled.
  */
 #include <zephyr/dt-bindings/i2c/i2c.h>
 
 &xiao_i2c {
+	compatible = "nordic,nrf-twim";
 	clock-frequency = <I2C_BITRATE_FAST>;
+	zephyr,concat-buf-size = <1025>;
 };

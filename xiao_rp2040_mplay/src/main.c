@@ -28,6 +28,12 @@
 
 /* Spectrum thread heartbeat + display_write() health. */
 static volatile uint32_t spectrum_loops;
+/* Frame work time (FFT + draw + OLED push, excluding the period sleep),
+ * summed over the frames since the last status report - the report prints
+ * the average as frame_us: the headroom left in SPECTRUM_FRAME_MS.
+ */
+static volatile uint32_t frame_work_us_sum;
+static volatile uint32_t frame_work_count;
 static volatile uint32_t oled_errors;
 static volatile int oled_last_error;
 
@@ -190,6 +196,7 @@ static void spectrum_thread(void *p1, void *p2, void *p3)
 
 	while (1) {
 		int ret;
+		uint32_t work_start = k_cycle_get_32();
 
 		if (spectrum_process() == SPECTRUM_MODE_SCOPE) {
 			uint8_t ys[SCOPE_WIDTH];
@@ -210,6 +217,8 @@ static void spectrum_thread(void *p1, void *p2, void *p3)
 			oled_last_error = ret;
 		}
 		spectrum_loops++;
+		frame_work_us_sum += k_cyc_to_us_floor32(k_cycle_get_32() - work_start);
+		frame_work_count++;
 
 		/* Fixed 40ms frame period (25 fps) - sleep only for what's left
 		 * of it. This used to be a flat k_msleep(40) *after* the work,
@@ -346,12 +355,21 @@ int main(void)
 			struct audio_stats st;
 
 			audio_get_stats(&st);
+			/* Racy read of the two sums (other thread) - fine for a
+			 * once-a-second diagnostic average.
+			 */
+			uint32_t n = frame_work_count;
+			uint32_t frame_us = n ? frame_work_us_sum / n : 0;
+
+			frame_work_us_sum = 0;
+			frame_work_count = 0;
 			printk("song=%u pos=%d row=%d underruns=%u irqs=%u errs=%u(%d) "
-			       "restarts=%u spec_loops=%u oled_errs=%u(%d)\n",
+			       "restarts=%u spec_loops=%u frame_us=%u oled_errs=%u(%d)\n",
 			       (unsigned)song_idx + 1,
 			       player.current_position, player.current_row,
 			       st.underruns, st.irqs, st.errors, st.last_error,
-			       st.restarts, spectrum_loops, oled_errors, oled_last_error);
+			       st.restarts, spectrum_loops, frame_us, oled_errors,
+			       oled_last_error);
 			next_report += 1000;
 		}
 	}
