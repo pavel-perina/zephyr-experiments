@@ -164,6 +164,9 @@ static void fill_buffer(void)
  */
 #define SPECTRUM_BAR_MAX 64
 
+/* Display frame period - spectrum.c's envelope decay is tuned for it. */
+#define SPECTRUM_FRAME_MS 40
+
 /* Oscilloscope trace size - the whole OLED. */
 #define SCOPE_WIDTH  128
 #define SCOPE_HEIGHT 64
@@ -182,6 +185,8 @@ static void spectrum_thread(void *p1, void *p2, void *p3)
 	ARG_UNUSED(p1);
 	ARG_UNUSED(p2);
 	ARG_UNUSED(p3);
+
+	int64_t next_frame = k_uptime_get();
 
 	while (1) {
 		int ret;
@@ -206,7 +211,23 @@ static void spectrum_thread(void *p1, void *p2, void *p3)
 		}
 		spectrum_loops++;
 
-		k_msleep(40);
+		/* Fixed 40ms frame period (25 fps) - sleep only for what's left
+		 * of it. This used to be a flat k_msleep(40) *after* the work,
+		 * so the real period was 40ms + FFT + the ~23ms I2C push: ~58ms
+		 * (~17 fps) on the RP2040, ~80ms (~12 fps) on the XIAO BLE - and
+		 * spectrum.c's DECAY_ALPHA_Q14, computed for exactly 40ms steps,
+		 * made the bars fall correspondingly slower than designed. If a
+		 * frame overruns the period, carry on from now rather than
+		 * rushing to catch up.
+		 */
+		next_frame += SPECTRUM_FRAME_MS;
+		int64_t left = next_frame - k_uptime_get();
+
+		if (left > 0) {
+			k_msleep((int32_t)left);
+		} else {
+			next_frame = k_uptime_get();
+		}
 	}
 }
 
