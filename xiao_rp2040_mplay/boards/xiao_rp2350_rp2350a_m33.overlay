@@ -1,0 +1,56 @@
+/*
+ * XIAO RP2350 (untested on hardware - builds only). Same setup as
+ * xiao_rp2040.overlay, but the expansion board's buzzer pin A3/D3 is
+ * GPIO5 on this board, not GPIO29: PWM slice 2, channel B (slice =
+ * (gpio >> 1) & 7, channel = gpio & 1) - see PWM_SLICE in main.c.
+ * Also used by the Hazard3 (RISC-V) variant, see
+ * xiao_rp2350_rp2350a_hazard3.overlay.
+ */
+#include <zephyr/dt-bindings/pinctrl/rpi-pico-rp2350a-pinctrl.h>
+#include <zephyr/dt-bindings/gpio/gpio.h>
+
+/ {
+	chosen {
+		zephyr,console = &usb_cdc;
+	};
+};
+
+&pinctrl {
+	pwm_ch2b_default: pwm_ch2b_default {
+		group1 {
+			pinmux = <RP2XXX_PINMUX(5, RP2_PINCTRL_GPIO_FUNC_PWM)>;
+		};
+	};
+};
+
+&pwm {
+	status = "okay";
+	pinctrl-0 = <&pwm_ch2b_default>;
+	pinctrl-names = "default";
+};
+
+&dma {
+	status = "okay";
+};
+
+/* The board splits its 2 MB flash into 1 MB code + a 1 MB storage
+ * partition (for a filesystem/settings, unused here) - but the firmware
+ * with the embedded playlist is ~1.4 MB. Give code the whole chip, like
+ * the XIAO RP2040's layout.
+ */
+/delete-node/ &storage_partition;
+
+&code_partition {
+	reg = <0x0 0x200000>;
+};
+
+&zephyr_udc0 {
+	usb_cdc: usb_cdc_0 {
+		compatible = "zephyr,cdc-acm-uart";
+	};
+};
+
+/* D1 button (the shield's gpio-keys node): 50ms debounce, as on RP2040. */
+&{/buttons} {
+	debounce-interval-ms = <50>;
+};

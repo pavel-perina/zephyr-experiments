@@ -1,6 +1,6 @@
 /*
  * XIAO RP2040 + Seeeduino expansion board: mod_player.c driving the board's
- * passive piezo buzzer (A3/D3 = GPIO29) via PWM, instead of pico_mplay's
+ * passive piezo buzzer (A3/D3 - GPIO29 on the RP2040, see PWM_SLICE) via PWM, instead of pico_mplay's
  * I2S DAC output. mod_player.c/.h are copied here unmodified - the only
  * thing that changes going from I2S to PWM is what a "sample" becomes on
  * its way out: instead of packing a 16-bit signed sample into a stereo I2S
@@ -45,10 +45,20 @@
 #include "spectrum.h"
 #include "diag.h"
 
-/* A3/D3 = GPIO29 = PWM slice 6, channel B (slice = (gpio>>1)&7, channel =
- * gpio&1). Zephyr's PWM "channel" numbering is slice*2 + (0=A, 1=B).
+/* The expansion board's buzzer is on A3/D3, which is a different GPIO on
+ * each XIAO: slice = (gpio>>1)&7, channel = gpio&1 (B here on both).
+ * Zephyr's PWM "channel" numbering is slice*2 + (0=A, 1=B). Must match the
+ * pinctrl in the board's overlay under boards/.
  */
-#define PWM_SLICE   6
+#if defined(CONFIG_BOARD_XIAO_RP2350)
+/* XIAO RP2350: D3 = GPIO5 = slice 2, channel B. Untested on hardware. */
+#define PWM_SLICE    2
+#define PWM_DMA_SLOT RPI_PICO_DMA_SLOT_PWM_WRAP2
+#else
+/* XIAO RP2040: D3 = GPIO29 = slice 6, channel B. */
+#define PWM_SLICE    6
+#define PWM_DMA_SLOT RPI_PICO_DMA_SLOT_PWM_WRAP6
+#endif
 #define PWM_CHANNEL (PWM_SLICE * 2 + 1)
 
 #define SAMPLE_RATE_HZ 48000u
@@ -238,7 +248,7 @@ static struct dma_config dma_cfg = {
 	.dest_burst_length = 1,
 	.block_count = 1,
 	.head_block = &dma_block,
-	.dma_slot = RPI_PICO_DMA_SLOT_PWM_WRAP6,
+	.dma_slot = PWM_DMA_SLOT,
 	.dma_callback = dma_done,
 };
 static volatile uint32_t dma_restart_count;
@@ -358,18 +368,21 @@ static void spectrum_thread(void *p1, void *p2, void *p3)
 K_THREAD_DEFINE(spectrum_tid, 4096 + 256, spectrum_thread, NULL, NULL, NULL,
 		 K_LOWEST_APPLICATION_THREAD_PRIO, 0, K_TICKS_FOREVER);
 
-/* The XIAO's RGB user LED (led0/1/2 = blue GPIO25, green GPIO16, red
- * GPIO17, all active-low). Left unconfigured, those pins come up as inputs
- * with the RP2040's default pull-down, which sinks enough current through
- * the LEDs to light them - drive them to their inactive (high) level
- * instead.
+/* The XIAO's user LEDs (RP2040: an RGB trio, led0/1/2 = blue GPIO25,
+ * green GPIO16, red GPIO17, all active-low; RP2350: a single led0). Left
+ * unconfigured, those pins come up as inputs with the RP2040's default
+ * pull-down, which sinks enough current through the LEDs to light them -
+ * drive them to their inactive level instead. Only the aliases the board
+ * actually defines are used.
  */
+#define USER_LED_SPEC(alias) GPIO_DT_SPEC_GET(DT_ALIAS(alias), gpios),
+
 static void user_leds_off(void)
 {
 	const struct gpio_dt_spec leds[] = {
-		GPIO_DT_SPEC_GET(DT_ALIAS(led0), gpios),
-		GPIO_DT_SPEC_GET(DT_ALIAS(led1), gpios),
-		GPIO_DT_SPEC_GET(DT_ALIAS(led2), gpios),
+		IF_ENABLED(DT_NODE_EXISTS(DT_ALIAS(led0)), (USER_LED_SPEC(led0)))
+		IF_ENABLED(DT_NODE_EXISTS(DT_ALIAS(led1)), (USER_LED_SPEC(led1)))
+		IF_ENABLED(DT_NODE_EXISTS(DT_ALIAS(led2)), (USER_LED_SPEC(led2)))
 	};
 
 	for (size_t i = 0; i < ARRAY_SIZE(leds); i++) {

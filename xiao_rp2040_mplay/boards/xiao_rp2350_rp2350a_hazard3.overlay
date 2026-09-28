@@ -1,0 +1,2 @@
+/* XIAO RP2350 on its Hazard3 (RISC-V) cores - same board wiring. */
+#include "xiao_rp2350_rp2350a_m33.overlay"
