@@ -1,0 +1,19 @@
+/*
+ * XIAO BLE (nRF52840). The USB CDC console node comes from the board
+ * definition, the buzzer pin and button debounce from
+ * expansion_board.overlay - this only fixes the OLED's I2C speed.
+ *
+ * The board puts xiao_i2c on the legacy TWI peripheral with no
+ * clock-frequency, i.e. the 100 kHz default: a full 1 KB OLED frame then
+ * takes ~92 ms on the wire and the display ran at ~6 fps (vs ~18 on the
+ * XIAO RP2040, whose board file sets 400 kHz). 400 kHz here too. Kept on
+ * the legacy TWI driver: the EasyDMA TWIM one would need a >1 KB
+ * zephyr,concat-buf-size, since the SSD1306 driver sends each frame as a
+ * control-byte message plus a data message that must go out as one
+ * transfer.
+ */
+#include <zephyr/dt-bindings/i2c/i2c.h>
+
+&xiao_i2c {
+	clock-frequency = <I2C_BITRATE_FAST>;
+};

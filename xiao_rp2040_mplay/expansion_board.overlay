@@ -1,0 +1,29 @@
+/*
+ * Seeed XIAO expansion board settings common to every XIAO, on top of
+ * Zephyr's seeed_xiao_expansion_board shield (OLED, button, RTC).
+ *
+ * The expansion board's passive buzzer is on A3/D3. Described through the
+ * XIAO connector (&xiao_d, from each board's seeed_xiao_connector.dtsi), so
+ * it resolves to the right real pin on every XIAO: GPIO29 on the RP2040,
+ * GPIO5 on the RP2350, P0.29 on the nRF52840 - Zephyr's devicetree tooling
+ * translates the connector's gpio-map. The audio backends read it with
+ * DT_GPIO_PIN(DT_PATH(zephyr_user), buzzer_gpios).
+ *
+ * The D1 button (the shield's gpio-keys node, which has no label of its
+ * own) gets a bit more debounce than the 30ms default for this tactile
+ * switch.
+ *
+ * Applied to every board via EXTRA_DTC_OVERLAY_FILE in CMakeLists.txt (an
+ * app.overlay would be skipped whenever boards/<board>.overlay exists).
+ */
+#include <zephyr/dt-bindings/gpio/gpio.h>
+
+/ {
+	zephyr,user {
+		buzzer-gpios = <&xiao_d 3 GPIO_ACTIVE_HIGH>;
+	};
+};
+
+&{/buttons} {
+	debounce-interval-ms = <50>;
+};

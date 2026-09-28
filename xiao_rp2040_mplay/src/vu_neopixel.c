@@ -1,3 +1,4 @@
+#include <errno.h>
 #include <math.h>
 
 #include <zephyr/device.h>
@@ -5,6 +6,8 @@
 
 #include "vu_neopixel.h"
 #include "color_luts.h"
+
+#if DT_NODE_EXISTS(DT_ALIAS(led_strip))
 
 static const struct device *strip_dev;
 
@@ -106,3 +109,18 @@ void vu_neopixel_update(const int16_t *samples, size_t n)
 
 	led_strip_update_rgb(strip_dev, &pixel, 1);
 }
+
+#else /* no NeoPixel on this board (e.g. XIAO BLE) */
+
+int vu_neopixel_init(void)
+{
+	return -ENODEV;
+}
+
+void vu_neopixel_update(const int16_t *samples, size_t n)
+{
+	ARG_UNUSED(samples);
+	ARG_UNUSED(n);
+}
+
+#endif

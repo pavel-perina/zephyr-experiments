@@ -21,6 +21,9 @@
 #include <zephyr/drivers/watchdog.h>
 #include <zephyr/linker/section_tags.h>
 #include <zephyr/sys/reboot.h>
+#if defined(CONFIG_SOC_FAMILY_NORDIC_NRF)
+#include <soc.h>
+#endif
 
 #include "diag.h"
 
@@ -40,6 +43,28 @@ static __noinit struct crash_record crash;
 static const struct device *wdt_dev = DEVICE_DT_GET(DT_ALIAS(watchdog0));
 static int wdt_channel = -1;
 
+#if defined(CONFIG_SOC_FAMILY_NORDIC_NRF)
+/* nRF52: the watchdog is only reset by power-on, brownout, pin and its own
+ * reset - not by a soft reset, which is what sys_reboot() (and so the
+ * fatal handler above) does. Once started it can't be stopped or
+ * reconfigured either. So after a crash-reboot the previous run's 2s
+ * watchdog is still counting - through diag_init()'s 2s console delay,
+ * before our own is armed - and Zephyr's driver can't take it over
+ * (wdt_setup() fails on a running WDT). Feed it by hand instead: every
+ * enabled reload register, with the magic reload value.
+ */
+static bool nrf_wdt_inherited;
+
+static void nrf_wdt_feed_inherited(void)
+{
+	for (int i = 0; i < 8; i++) {
+		if (NRF_WDT->RREN & BIT(i)) {
+			NRF_WDT->RR[i] = 0x6E524635;   /* WDT_RR_RR_Reload */
+		}
+	}
+}
+#endif
+
 void k_sys_fatal_error_handler(unsigned int reason, const struct arch_esf *esf)
 {
 	crash.reason = reason;
@@ -58,10 +83,22 @@ void k_sys_fatal_error_handler(unsigned int reason, const struct arch_esf *esf)
 
 void diag_init(void)
 {
+#if defined(CONFIG_SOC_FAMILY_NORDIC_NRF)
+	nrf_wdt_inherited = NRF_WDT->RUNSTATUS & WDT_RUNSTATUS_RUNSTATUS_Msk;
+#endif
+
 	/* Give the host a moment to open the CDC port after enumeration,
-	 * otherwise this one-shot boot report is usually lost.
+	 * otherwise this one-shot boot report is usually lost. In 100ms steps
+	 * so an inherited nRF watchdog (see above) can be fed meanwhile.
 	 */
-	k_msleep(2000);
+	for (int i = 0; i < 20; i++) {
+#if defined(CONFIG_SOC_FAMILY_NORDIC_NRF)
+		if (nrf_wdt_inherited) {
+			nrf_wdt_feed_inherited();
+		}
+#endif
+		k_msleep(100);
+	}
 
 	uint32_t cause = 0;
 
@@ -86,6 +123,13 @@ void diag_init(void)
 	}
 	crash.magic = 0;
 
+#if defined(CONFIG_SOC_FAMILY_NORDIC_NRF)
+	if (nrf_wdt_inherited) {
+		printk("watchdog still running from before the soft reset - feeding it directly\n");
+		return;
+	}
+#endif
+
 	if (!device_is_ready(wdt_dev)) {
 		printk("watchdog not ready\n");
 		return;
@@ -105,6 +149,12 @@ void diag_init(void)
 
 void diag_feed(void)
 {
+#if defined(CONFIG_SOC_FAMILY_NORDIC_NRF)
+	if (nrf_wdt_inherited) {
+		nrf_wdt_feed_inherited();
+		return;
+	}
+#endif
 	if (wdt_channel >= 0) {
 		wdt_feed(wdt_dev, wdt_channel);
 	}

@@ -16,38 +16,36 @@
 #include <zephyr/device.h>
 #include <zephyr/drivers/pwm.h>
 #include <zephyr/drivers/dma.h>
-#if defined(CONFIG_SOC_SERIES_RP2350)
-#include <zephyr/dt-bindings/dma/rpi-pico-dma-rp2350.h>
-#else
-#include <zephyr/dt-bindings/dma/rpi-pico-dma-rp2040.h>
-#endif
+#include <zephyr/dt-bindings/dma/rpi-pico-dma-common.h>
+#include <hardware/gpio.h>
+#include <hardware/pwm.h>
 #include <hardware/structs/pwm.h>
 #include <hardware/structs/dma.h>
 
 #include "audio_backend.h"
 
-/* The expansion board's buzzer is on A3/D3, which is a different GPIO on
- * each XIAO: slice = (gpio>>1)&7, channel = gpio&1 (B here on both).
- * Zephyr's PWM "channel" numbering is slice*2 + (0=A, 1=B). Must match the
- * pinctrl in the board's overlay under boards/.
+/* The buzzer pin, from expansion_board.overlay (XIAO connector D3, resolved to the
+ * real GPIO). The PWM slice/channel and the DMA request all follow from
+ * it; the pin mux itself is the pinctrl in the board's overlay under
+ * boards/ - audio_hw_init() checks the two agree.
  */
-#if defined(CONFIG_BOARD_XIAO_RP2350)
-/* XIAO RP2350: D3 = GPIO5 = slice 2, channel B. Untested on hardware. */
-#define PWM_SLICE    2
-#define PWM_DMA_SLOT RPI_PICO_DMA_SLOT_PWM_WRAP2
-#else
-/* XIAO RP2040: D3 = GPIO29 = slice 6, channel B. */
-#define PWM_SLICE    6
-#define PWM_DMA_SLOT RPI_PICO_DMA_SLOT_PWM_WRAP6
+#define BUZZER_PIN DT_GPIO_PIN(DT_PATH(zephyr_user), buzzer_gpios)
+
+#if defined(CONFIG_BOARD_XIAO_RP2040)
+BUILD_ASSERT(BUZZER_PIN == 29, "XIAO RP2040 D3 should resolve to GPIO29");
+#elif defined(CONFIG_BOARD_XIAO_RP2350)
+BUILD_ASSERT(BUZZER_PIN == 5, "XIAO RP2350 D3 should resolve to GPIO5");
 #endif
-#define PWM_CHANNEL (PWM_SLICE * 2 + 1)
+
+static uint slice;      /* pwm_gpio_to_slice_num(BUZZER_PIN) */
+static uint channel;    /* pwm_gpio_to_channel(BUZZER_PIN): 0 = A, 1 = B */
 
 #define SAMPLE_RATE_HZ 48000u
 
 static const struct device *pwm_dev = DEVICE_DT_GET(DT_NODELABEL(pwm));
 static const struct device *dma_dev = DEVICE_DT_GET(DT_NODELABEL(dma));
 static uint32_t dma_channel;
-static volatile uint16_t *cc_half;   /* channel B = high half of slice[PWM_SLICE].cc */
+static volatile uint16_t *cc_half;   /* our channel's half of slice[slice].cc */
 
 static void dma_done(const struct device *dev, void *user_data, uint32_t channel, int status);
 
@@ -66,7 +64,7 @@ static struct dma_config dma_cfg = {
 	.dest_burst_length = 1,
 	.block_count = 1,
 	.head_block = &dma_block,
-	.dma_slot = PWM_DMA_SLOT,
+	.dma_slot = 0,   /* the slice's wrap DREQ, set in audio_hw_init() */
 	.dma_callback = dma_done,
 };
 
@@ -114,9 +112,14 @@ int audio_hw_init(uint32_t *top, uint32_t *sample_rate)
 		return -ENODEV;
 	}
 
+	slice = pwm_gpio_to_slice_num(BUZZER_PIN);
+	channel = pwm_gpio_to_channel(BUZZER_PIN);
+
+	/* Zephyr's PWM "channel" numbering is slice*2 + (0=A, 1=B). */
+	uint32_t zephyr_channel = slice * 2 + channel;
 	uint64_t cycles_per_sec;
 
-	pwm_get_cycles_per_sec(pwm_dev, PWM_CHANNEL, &cycles_per_sec);
+	pwm_get_cycles_per_sec(pwm_dev, zephyr_channel, &cycles_per_sec);
 
 	/* PWM slice wraps (and DMA supplies the next duty value) at exactly
 	 * SAMPLE_RATE_HZ - same "sample rate via wrap DREQ" concept as
@@ -125,9 +128,15 @@ int audio_hw_init(uint32_t *top, uint32_t *sample_rate)
 	 */
 	uint32_t period_cycles = (uint32_t)(cycles_per_sec / SAMPLE_RATE_HZ);
 
-	pwm_set_cycles(pwm_dev, PWM_CHANNEL, period_cycles, 0, 0);
-	cc_half = (volatile uint16_t *)&pwm_hw->slice[PWM_SLICE].cc + 1;
+	pwm_set_cycles(pwm_dev, zephyr_channel, period_cycles, 0, 0);
+	cc_half = (volatile uint16_t *)&pwm_hw->slice[slice].cc + channel;
 	dma_block.dest_address = (uintptr_t)cc_half;
+	dma_cfg.dma_slot = RPI_PICO_DMA_DREQ_TO_SLOT(pwm_get_dreq(slice));
+
+	if (gpio_get_function(BUZZER_PIN) != GPIO_FUNC_PWM) {
+		printk("audio: WARNING GPIO%d isn't muxed to PWM - check the pinctrl in "
+		       "the board overlay against expansion_board.overlay\n", BUZZER_PIN);
+	}
 
 	int ch = dma_request_channel(dma_dev, NULL);
 
@@ -139,8 +148,9 @@ int audio_hw_init(uint32_t *top, uint32_t *sample_rate)
 
 	*top = period_cycles - 1;
 	*sample_rate = (uint32_t)(cycles_per_sec / period_cycles);
-	printk("audio: rp2xxx PWM slice %d, cycles_per_sec=%llu period_cycles=%u\n",
-	       PWM_SLICE, cycles_per_sec, period_cycles);
+	printk("audio: rp2xxx GPIO%d = PWM slice %u channel %c, cycles_per_sec=%llu "
+	       "period_cycles=%u\n", BUZZER_PIN, slice, channel ? 'B' : 'A', cycles_per_sec,
+	       period_cycles);
 	return 0;
 }
 
@@ -177,8 +187,8 @@ void audio_hw_poll(void)
 	       dma_hw->ch[dma_channel].transfer_count,
 	       dma_hw->ch[dma_channel].read_addr,
 	       dma_hw->inte0, dma_hw->intr,
-	       pwm_hw->slice[PWM_SLICE].csr,
-	       pwm_hw->slice[PWM_SLICE].ctr);
+	       pwm_hw->slice[slice].csr,
+	       pwm_hw->slice[slice].ctr);
 
 	unsigned int key = irq_lock();
 

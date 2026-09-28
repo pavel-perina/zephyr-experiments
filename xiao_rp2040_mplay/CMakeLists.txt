@@ -9,6 +9,11 @@ cmake_minimum_required(VERSION 3.20.0)
 # boards/xiao_rp2040.overlay, since the shield doesn't know about it.
 set(SHIELD seeed_xiao_expansion_board)
 
+# Expansion-board settings for every XIAO (buzzer pin via the XIAO
+# connector, button debounce) - see expansion_board.overlay. Appended to
+# (not replacing) the board overlays under boards/.
+list(APPEND EXTRA_DTC_OVERLAY_FILE ${CMAKE_CURRENT_LIST_DIR}/expansion_board.overlay)
+
 find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
 project(xiao_rp2040_mplay)
 
@@ -16,6 +21,7 @@ target_sources(app PRIVATE src/main.c src/mod_player.c src/vu_neopixel.c src/ole
                src/audio.c)
 # Audio output backend, one per SoC family - see src/audio_backend.h.
 target_sources_ifdef(CONFIG_SOC_FAMILY_RPI_PICO app PRIVATE src/audio_rp2xxx.c)
+target_sources_ifdef(CONFIG_SOC_FAMILY_NORDIC_NRF app PRIVATE src/audio_nrf.c)
 
 # Embed the playlist as flash data, generated at build time into the build
 # directory rather than committing ~6x larger generated headers. Each MOD
@@ -33,6 +39,18 @@ set(MOD_FILES
         JOHN.MOD
         LISBONFE.MOD
 )
+# The XIAO BLE (nRF52840) has 1 MB of flash, of which the code partition
+# (after the bootloader's reserved area) is ~790 KB - room for ~700 KB of
+# MODs next to the ~70 KB of code. The linker errors out if it overflows.
+if(CONFIG_BOARD_XIAO_BLE)
+    set(MOD_FILES
+        AXEL_F.MOD
+        POPCORN1.MOD
+        ELYSIUM.MOD
+        MOBY_DRAGONSFUNK.MOD
+        12TH.MOD
+    )
+endif()
 set(MOD_GEN_DIR ${CMAKE_CURRENT_BINARY_DIR}/mods)
 set(MOD_ARRAYS "")
 set(MOD_ENTRIES "")

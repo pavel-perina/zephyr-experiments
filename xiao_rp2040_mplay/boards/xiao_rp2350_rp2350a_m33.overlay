@@ -49,8 +49,3 @@
 		compatible = "zephyr,cdc-acm-uart";
 	};
 };
-
-/* D1 button (the shield's gpio-keys node): 50ms debounce, as on RP2040. */
-&{/buttons} {
-	debounce-interval-ms = <50>;
-};
