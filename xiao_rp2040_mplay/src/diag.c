@@ -68,8 +68,16 @@ static void nrf_wdt_feed_inherited(void)
 void k_sys_fatal_error_handler(unsigned int reason, const struct arch_esf *esf)
 {
 	crash.reason = reason;
+	/* Faulting PC and return address: ARM keeps them in the basic stack
+	 * frame, RISC-V (RP2350's Hazard3 cores) in mepc/ra.
+	 */
+#if defined(CONFIG_RISCV)
+	crash.pc = esf ? esf->mepc : 0;
+	crash.lr = esf ? esf->ra : 0;
+#else
 	crash.pc = esf ? esf->basic.pc : 0;
 	crash.lr = esf ? esf->basic.lr : 0;
+#endif
 	crash.uptime_ms = k_uptime_get_32();
 
 	const char *name = k_thread_name_get(k_current_get());
@@ -116,8 +124,10 @@ void diag_init(void)
 		       "thread=%s uptime=%ums\n",
 		       crash.reason, crash.pc, crash.lr, crash.thread,
 		       crash.uptime_ms);
-		printk("    decode: arm-zephyr-eabi-addr2line -e build/zephyr/zephyr.elf "
-		       "0x%08x 0x%08x\n", crash.pc, crash.lr);
+		printk("    decode: %s-addr2line -e build/zephyr/zephyr.elf "
+		       "0x%08x 0x%08x\n",
+		       IS_ENABLED(CONFIG_RISCV) ? "riscv64-zephyr-elf" : "arm-zephyr-eabi",
+		       crash.pc, crash.lr);
 	} else {
 		printk("no crash record from previous run\n");
 	}
