@@ -1,0 +1,24 @@
+/*
+ * XIAO BLE (nRF52840): SCD41 (CO2) and SHT40 (temperature/humidity) on the
+ * XIAO I2C pins (D4 = SDA, D5 = SCL), 100 kHz - also the SCD41's maximum.
+ */
+&xiao_i2c {
+	/* SCD41 in single-shot mode (mode 2): each sensor_sample_fetch()
+	 * triggers one ~5 s measurement. The SCD40 has no single-shot mode
+	 * (its Zephyr binding, sensirion,scd40, has no `mode` at all) - with
+	 * an SCD40 use compatible = "sensirion,scd40" and drop `mode`; it then
+	 * measures periodically every 5 s.
+	 */
+	scd41: scd41@62 {
+		compatible = "sensirion,scd41";
+		reg = <0x62>;
+		mode = <2>;
+	};
+
+	/* SHT40 (SHT41/45 too) - the sht4x driver. repeatability 2 = high (8.2 ms). */
+	sht4x: sht4x@44 {
+		compatible = "sensirion,sht4x";
+		reg = <0x44>;
+		repeatability = <2>;
+	};
+};
