@@ -1,0 +1,17 @@
+/* XIAO BLE (nRF52840): SCD41 on the XIAO I2C pins, D4 = SDA, D5 = SCL
+ * (xiao_i2c, already enabled by the board at 100 kHz - also the SCD41's
+ * maximum). The USB CDC console node comes from the board definition.
+ */
+/ {
+    aliases {
+        env-sensor = &scd41;
+    };
+};
+
+&xiao_i2c {
+    scd41: scd41@62 {
+        compatible = "sensirion,scd41";
+        reg = <0x62>;
+        mode = <0>; // Normal periodic measurement. Default interval of 5sec
+    };
+};
