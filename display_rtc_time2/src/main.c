@@ -26,7 +26,11 @@
 #define DISPLAY_HEIGHT 64
 #define DISPLAY_FB_SIZE (DISPLAY_WIDTH * DISPLAY_HEIGHT / 8)
 
-const struct device *display = DEVICE_DT_GET_ONE(solomon_ssd1306fb);
+/* The display the board/shield declares as zephyr,display (the SSD1306
+ * on the XIAO expansion board). Not DEVICE_DT_GET_ONE(solomon_ssd1306fb):
+ * that compatible was renamed to solomon,ssd1306 in newer Zephyr.
+ */
+const struct device *display = DEVICE_DT_GET(DT_CHOSEN(zephyr_display));
 const struct device *i2c_dev = DEVICE_DT_GET(DT_NODELABEL(xiao_i2c));
 
 struct display_buffer_descriptor display_descriptor = {

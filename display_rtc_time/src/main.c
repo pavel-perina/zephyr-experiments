@@ -12,7 +12,11 @@
  * 2. rpi_pico.overlay
  */
 const struct device *const rtc = DEVICE_DT_GET(DT_ALIAS(rtc));
-const struct device *display = DEVICE_DT_GET_ONE(solomon_ssd1306fb);
+/* The display the board/shield declares as zephyr,display (the SSD1306
+ * on the XIAO expansion board). Not DEVICE_DT_GET_ONE(solomon_ssd1306fb):
+ * that compatible was renamed to solomon,ssd1306 in newer Zephyr.
+ */
+const struct device *display = DEVICE_DT_GET(DT_CHOSEN(zephyr_display));
 
 static int set_date_time(const struct device *rtc)
 {
