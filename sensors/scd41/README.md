@@ -4,6 +4,26 @@ On XIAO RP2040 it writes output below. Note that results are invalid for first f
 not (reliably) updated in less than five seconds so the same values are reported repeatably. 
 Internally SCD41 returns error on temperature read and must be queried if measurement is ready.
 
+Build for ESP32:
+
+```sh
+west build -p -b esp32_devkitc/esp32/procpu
+west flash
+# or
+esptool --port /dev/ttyACM0 --baud 921600 write-flash 0x1000 build/zephyr/zephyr.bin 
+```
+
+Build for Raspberry Pi Pico:
+
+```sh
+
+```
+
+Build for Xiao Seeed RP2040
+```sh
+```
+
+
 ```txt
 .venv) [pavel@thinkpad -=- ~/zephyrproject/zephyr-experiments/sensors/scd41]$ udisksctl mount -b /dev/sdb1 && west flash -r uf2                                                  
 Mounted /dev/sdb1 at /run/media/pavel/RPI-RP2
