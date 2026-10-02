@@ -1,6 +1,7 @@
 #include <zephyr/kernel.h>
 #include <zephyr/device.h>
 #include <zephyr/drivers/sensor.h>
+#include <zephyr/drivers/uart.h>
 
 const struct device *const sensor = DEVICE_DT_GET(DT_ALIAS(env_sensor));
 
@@ -15,11 +16,31 @@ int sensor_print_helper(const struct device *const sensor, int channel, const ch
     return ret;
 }
 
+/* With a USB CDC console (RP2040/Pico), output printed before a terminal
+ * opens the port is lost - wait until the host raises DTR. Consoles without
+ * line control (a real UART, e.g. ESP32 via its USB-serial bridge) skip it.
+ */
+static void wait_for_terminal(void) {
+#if defined(CONFIG_UART_LINE_CTRL)
+    const struct device *const console = DEVICE_DT_GET(DT_CHOSEN(zephyr_console));
+    uint32_t dtr = 0;
+
+    while (uart_line_ctrl_get(console, UART_LINE_CTRL_DTR, &dtr) == 0 && !dtr) {
+        k_msleep(100);
+    }
+#endif
+}
+
 int main(void) {
+    wait_for_terminal();
     printk("Starting\n");
-    if (!device_is_ready(sensor)) {
+
+    /* Keep saying so instead of returning, so the console always shows
+     * what's wrong (e.g. sensor not wired to these pins).
+     */
+    while (!device_is_ready(sensor)) {
         printk("Sensor not ready!\n");
-        return -1;
+        k_sleep(K_SECONDS(5));
     }
 
     while (1) {

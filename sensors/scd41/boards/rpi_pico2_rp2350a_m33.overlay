@@ -1,0 +1,5 @@
+/* Pico 2 (rpi_pico2/rp2350a/m33): same wiring and console as the Pico 2 W.
+ * An #include rather than a symlink, so it also survives a checkout on
+ * Windows.
+ */
+#include "rpi_pico2_rp2350a_m33_w.overlay"

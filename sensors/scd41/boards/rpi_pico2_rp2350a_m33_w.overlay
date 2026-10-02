@@ -3,18 +3,30 @@
     aliases {
         env-sensor = &scd41;
     };
+
+    /* Console on the USB CDC device below. The Pico's board file points
+     * the console at UART0 (GPIO0/GPIO1); without this, the USB serial
+     * port enumerates but printk output goes to the UART pins.
+     */
+    chosen {
+        zephyr,console = &usb_cdc;
+    };
 };
 
 &pinctrl {
     i2c0_custom: i2c0_custom {
+        /* SDA and SCL both need the pad input enabled: an I2C controller
+         * reads SCL too (clock stretching - the SCD41 uses it - and bus
+         * busy detection). With SCL in a group without input-enable, the
+         * RP2xxx pinctrl driver switches its input buffer off and every
+         * transfer fails ("Sensor not ready"). Same form as the board's
+         * own i2c0_default, plus the pad pull-ups.
+         */
         group1 {
-            pinmux = <I2C0_SDA_P0>;
+//            pinmux = <I2C0_SDA_P0>, <I2C0_SCL_P1>;
+            pinmux = <I2C0_SDA_P16>, <I2C0_SCL_P17>;
             input-enable;
             input-schmitt-enable;
-            bias-pull-up;
-        };
-        group2 {
-            pinmux = <I2C0_SCL_P1>;
             bias-pull-up;
         };
     };
@@ -24,7 +36,7 @@
     status = "okay";
     pinctrl-0 = <&i2c0_custom>;
     pinctrl-names = "default";
-    
+
     scd41: scd41@62 {
         compatible = "sensirion,scd41";
         reg = <0x62>;
@@ -32,3 +44,10 @@
         status="okay";
     };
 };
+
+&zephyr_udc0 {
+    usb_cdc: usb_cdc_0 {
+        compatible = "zephyr,cdc-acm-uart";
+    };
+};
+
