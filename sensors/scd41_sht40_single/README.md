@@ -1,5 +1,7 @@
 # SCD41 + SHT40 single-shot logger
 
+Version form 2026-10-01
+
 **Boards:**
 - XIAO BLE (nRF52840) · `west build -b xiao_ble` · SCD41 and SHT40 on the
   XIAO I2C pins (D4 = SDA, D5 = SCL, 3.3 V, GND) · console/shell on USB.
