@@ -1,0 +1,26 @@
+/*
+ * Classic ESP32 boards via the in-tree esp32_devkitc/esp32/procpu target,
+ * e.g. the LilyGO T5 V2.3.1 (ESP32-D0WDQ6-V3, 4 MB flash, no PSRAM):
+ * console on UART0 (the board's USB-serial chip, CH9102 on the T5, 115200),
+ * SCD41 and SHT40 on I2C0 = SDA GPIO21, SCL GPIO22 (already configured by
+ * the board, 100 kHz - also the SCD41's maximum).
+ *
+ * esp32_devkitc describes a WROVER-E module with PSRAM; PSRAM support
+ * (CONFIG_ESP_SPIRAM) stays off unless enabled, so this runs on PSRAM-less
+ * chips too. A proper T5 board definition (e-paper on SPI, button on
+ * GPIO39) would be its own project.
+ */
+&i2c0 {
+	/* SCD41 single-shot (mode 2), see xiao_ble.overlay for the SCD40 note. */
+	scd41: scd41@62 {
+		compatible = "sensirion,scd41";
+		reg = <0x62>;
+		mode = <2>;
+	};
+
+	sht4x: sht4x@44 {
+		compatible = "sensirion,sht4x";
+		reg = <0x44>;
+		repeatability = <2>;
+	};
+};

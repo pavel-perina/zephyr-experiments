@@ -1,11 +1,40 @@
 # SCD41 + SHT40 single-shot logger
 
-**Board:** XIAO BLE (nRF52840) · `west build -b xiao_ble` · SCD41 and SHT40
-on the XIAO I2C pins (D4 = SDA, D5 = SCL, 3.3 V, GND).
+**Boards:**
+- XIAO BLE (nRF52840) · `west build -b xiao_ble` · SCD41 and SHT40 on the
+  XIAO I2C pins (D4 = SDA, D5 = SCL, 3.3 V, GND) · console/shell on USB.
+- Classic ESP32, e.g. LilyGO T5 V2.3.1 · `west build -b
+  esp32_devkitc/esp32/procpu` · sensors on GPIO21 = SDA, GPIO22 = SCL ·
+  console/shell on UART0 (the board's USB-serial chip), 115200 baud.
+
+## Build and flash
+
+XIAO BLE (UF2 bootloader: double-tap reset, drive `XIAO-SENSE`):
+
+```
+west build -p -b xiao_ble
+west flash -r uf2          # drive must be mounted
+```
+
+ESP32 (simple boot: one image at 0x1000, no MCUboot; the USB-serial
+chip's auto-reset enters the ROM bootloader, no buttons needed):
+
+```
+west build -p -b esp32_devkitc/esp32/procpu
+west flash                 # uses esptool; or by hand:
+esptool --chip esp32 --port /dev/ttyACM0 --baud 921600 write-flash 0x1000 build/zephyr/zephyr.bin
+picocom -b 115200 /dev/ttyACM0     # console + shell (Ctrl-A Ctrl-X quits)
+```
+
+Flashing Zephyr replaces MicroPython. To put MicroPython back:
+`esptool --chip esp32 --port /dev/ttyACM0 erase-flash`, then
+`esptool --chip esp32 --port /dev/ttyACM0 --baud 460800 write-flash 0x1000 ESP32_GENERIC-<version>.bin`.
+
+## Usage
 
 Minimal first step towards a low-power CO2 logger: a thread measures every
 30 s - the SCD41 in **single-shot** mode (~5 s per measurement) and the
-SHT40 - and prints to the USB console, which also runs a shell:
+SHT40 - and prints to the console, which also runs a shell:
 
 - `logger now` - measure immediately
 - `logger interval <s>` - set the interval (6..3600 s)
