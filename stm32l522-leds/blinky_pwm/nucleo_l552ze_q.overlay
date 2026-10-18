@@ -1,0 +1,25 @@
+/ {
+    pwmleds: pwmleds {
+        compatible = "pwm-leds";
+
+        blue_pwm_led: blue_pwm_led {
+            pwms = <&pwm4 2 PWM_MSEC(20) PWM_POLARITY_NORMAL>;
+        };
+    };
+
+    aliases {
+        pwm-led0 = &blue_pwm_led;
+    };
+};
+
+&timers4 {
+    status = "okay";
+    /* 110 MHz / (10999 + 1) = 10 kHz tick -> max period 6.5 s on 16-bit TIM4 */
+    st,prescaler = <10999>;
+
+    pwm4: pwm {
+        status = "okay";
+        pinctrl-0 = <&tim4_ch2_pb7>;
+        pinctrl-names = "default";
+    };
+};
