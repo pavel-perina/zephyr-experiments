@@ -11,14 +11,14 @@ the board DTS, so no overlay is needed.
    the rules apply only to newly connected devices.
 2. Be in the `dialout` group for the console on `/dev/ttyACM0` (115200 8N1).
 
-The default runner is STM32CubeProgrammer, which I don't have installed,
-so `CMakeLists.txt` sets `BOARD_FLASH_RUNNER` to `openocd`.
+The board's default runner is STM32CubeProgrammer, which I don't have
+installed, so flash with `-r openocd`.
 
 ## Build and flash
 
 ```
 west build -p -b nucleo_l552ze_q .
-west flash
+west flash -r openocd
 ```
 
 Use the plain `nucleo_l552ze_q` target. The `nucleo_l552ze_q/stm32l552xx/ns`
