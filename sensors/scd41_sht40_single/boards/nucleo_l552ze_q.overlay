@@ -1,0 +1,27 @@
+/*
+ * NUCLEO-L552ZE-Q: SCD41 and SHT40 on I2C1, Arduino-style pins on the Zio
+ * header: D14 = PB9 = SDA, D15 = PB8 = SCL, plus 3V3 (CN8 pin 7) and GND.
+ * 100 kHz (the SoC default, also the SCD41's maximum).
+ *
+ * The board definition doesn't enable any I2C bus, so this does. The bus
+ * timing register is computed by the driver (no "timings" property).
+ * Console and shell stay on LPUART1 = the ST-LINK virtual COM port.
+ */
+&i2c1 {
+	pinctrl-0 = <&i2c1_scl_pb8 &i2c1_sda_pb9>;
+	pinctrl-names = "default";
+	status = "okay";
+
+	/* SCD41 single-shot (mode 2), see xiao_ble.overlay for the SCD40 note. */
+	scd41: scd41@62 {
+		compatible = "sensirion,scd41";
+		reg = <0x62>;
+		mode = <2>;
+	};
+
+	sht4x: sht4x@44 {
+		compatible = "sensirion,sht4x";
+		reg = <0x44>;
+		repeatability = <2>;
+	};
+};

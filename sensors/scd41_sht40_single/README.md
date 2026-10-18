@@ -8,6 +8,9 @@ Version form 2026-10-01
 - Classic ESP32, e.g. LilyGO T5 V2.3.1 · `west build -b
   esp32_devkitc/esp32/procpu` · sensors on GPIO21 = SDA, GPIO22 = SCL ·
   console/shell on UART0 (the board's USB-serial chip), 115200 baud.
+- NUCLEO-L552ZE-Q · `west build -b nucleo_l552ze_q` · sensors on the Zio
+  header D14 = SDA (PB9), D15 = SCL (PB8), 3V3, GND · console/shell on
+  the ST-LINK virtual COM port, 115200 baud.
 
 ## Build and flash
 
@@ -31,6 +34,15 @@ picocom -b 115200 /dev/ttyACM0     # console + shell (Ctrl-A Ctrl-X quits)
 Flashing Zephyr replaces MicroPython. To put MicroPython back:
 `esptool --chip esp32 --port /dev/ttyACM0 erase-flash`, then
 `esptool --chip esp32 --port /dev/ttyACM0 --baud 460800 write-flash 0x1000 ESP32_GENERIC-<version>.bin`.
+
+NUCLEO-L552ZE-Q (on-board ST-LINK; the board's default runner is
+STM32CubeProgrammer, so use OpenOCD):
+
+```
+west build -p -b nucleo_l552ze_q
+west flash -r openocd
+picocom -b 115200 /dev/ttyACM0
+```
 
 ## Usage
 
