@@ -1,0 +1,100 @@
+/*
+ * NUCLEO-L552ZE-Q with the XIAO expansion board on jumper wires (no XIAO
+ * in its socket), so the seeed_xiao_expansion_board shield isn't used -
+ * this describes the same parts directly:
+ *
+ *   expansion board   Nucleo (Zio header)
+ *   3V3, GND          3V3 (CN8 pin 7), GND
+ *   D4 / SDA          D14 = PB9 = I2C1_SDA
+ *   D5 / SCL          D15 = PB8 = I2C1_SCL
+ *   A3 / D3 buzzer    A0  = PA3 = TIM2_CH4
+ *
+ * The expansion board's D1 button isn't wired: the Nucleo's blue USER
+ * button B1 (PC13) is already a gpio-keys node with INPUT_KEY_0 in the
+ * board definition - the same key code main.c listens for.
+ *
+ * Console on LPUART1 = the ST-LINK virtual COM port (board default).
+ */
+#include <zephyr/dt-bindings/i2c/i2c.h>
+#include <zephyr/dt-bindings/pwm/pwm.h>
+
+/ {
+	chosen {
+		zephyr,display = &ssd1306_128x64;
+	};
+
+	aliases {
+		watchdog0 = &iwdg;   /* diag.c */
+	};
+
+	zephyr,user {
+		/* Buzzer PWM for audio_stm32.c: TIM2 channel 4. The period is
+		 * set at runtime (sample rate), so 0 here.
+		 */
+		pwms = <&pwm2 4 0 PWM_POLARITY_NORMAL>;
+
+		/* DMA channel that writes the next duty value into TIM2_CCR4
+		 * on every timer update (= every sample): DMA1 channel 1
+		 * (1-based), DMAMUX request 60 = TIM2_UP (RM0438, DMAMUX
+		 * table). The transfer itself is configured in audio_stm32.c,
+		 * so the config cell is 0.
+		 */
+		dmas = <&dma1 1 60 0>;
+	};
+};
+
+/* 400 kHz: a full 1 KB OLED frame takes ~23 ms on the wire instead of
+ * ~92 ms at the 100 kHz default.
+ */
+&i2c1 {
+	pinctrl-0 = <&i2c1_scl_pb8 &i2c1_sda_pb9>;
+	pinctrl-names = "default";
+	clock-frequency = <I2C_BITRATE_FAST>;
+	status = "okay";
+
+	/* Copied from the seeed_xiao_expansion_board shield - the init
+	 * parameters this panel needs.
+	 */
+	ssd1306_128x64: ssd1306@3c {
+		compatible = "solomon,ssd1306";
+		reg = <0x3c>;
+		width = <128>;
+		height = <64>;
+		segment-offset = <0>;
+		page-offset = <0>;
+		display-offset = <0>;
+		multiplex-ratio = <63>;
+		segment-remap;
+		com-invdir;
+		prechargep = <0x22>;
+	};
+};
+
+/* TIM2 is 32-bit, clocked at 110 MHz with no prescaler: 110 MHz / 48 kHz
+ * = 2291 counts per sample period (~11 bits of duty resolution).
+ */
+&timers2 {
+	status = "okay";
+
+	pwm2: pwm {
+		pinctrl-0 = <&tim2_ch4_pa3>;
+		pinctrl-names = "default";
+		status = "okay";
+	};
+};
+
+/* DMA1 is used directly (channel + request in the dmas cell above); the
+ * DMAMUX node must be enabled too, its driver turns on the DMAMUX clock -
+ * same setup as Zephyr's samples/drivers/spi_flash for stm32l562e_dk.
+ */
+&dma1 {
+	status = "okay";
+};
+
+&dmamux1 {
+	status = "okay";
+};
+
+&iwdg {
+	status = "okay";
+};

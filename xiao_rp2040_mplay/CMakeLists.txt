@@ -7,12 +7,20 @@ cmake_minimum_required(VERSION 3.20.0)
 # flag needed, same reasoning as the self-contained CDC-ACM console setup.
 # Does not cover the buzzer - that pinctrl/PWM setup stays in
 # boards/xiao_rp2040.overlay, since the shield doesn't know about it.
-set(SHIELD seeed_xiao_expansion_board)
+#
+# Only for XIAO boards: the shield and expansion_board.overlay are written
+# against the XIAO connector (&xiao_d, &xiao_i2c). Other boards wire the
+# expansion board by jumper wires and describe it in their own
+# boards/<board>.overlay (e.g. nucleo_l552ze_q). Gated on BOARD, not
+# CONFIG_BOARD_*: Kconfig hasn't run yet before find_package.
+if(BOARD MATCHES "^xiao_")
+    set(SHIELD seeed_xiao_expansion_board)
 
-# Expansion-board settings for every XIAO (buzzer pin via the XIAO
-# connector, button debounce) - see expansion_board.overlay. Appended to
-# (not replacing) the board overlays under boards/.
-list(APPEND EXTRA_DTC_OVERLAY_FILE ${CMAKE_CURRENT_LIST_DIR}/expansion_board.overlay)
+    # Expansion-board settings for every XIAO (buzzer pin via the XIAO
+    # connector, button debounce) - see expansion_board.overlay. Appended
+    # to (not replacing) the board overlays under boards/.
+    list(APPEND EXTRA_DTC_OVERLAY_FILE ${CMAKE_CURRENT_LIST_DIR}/expansion_board.overlay)
+endif()
 
 find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
 project(xiao_rp2040_mplay)
@@ -22,6 +30,7 @@ target_sources(app PRIVATE src/main.c src/mod_player.c src/vu_neopixel.c src/ole
 # Audio output backend, one per SoC family - see src/audio_backend.h.
 target_sources_ifdef(CONFIG_SOC_FAMILY_RPI_PICO app PRIVATE src/audio_rp2xxx.c)
 target_sources_ifdef(CONFIG_SOC_FAMILY_NORDIC_NRF app PRIVATE src/audio_nrf.c)
+target_sources_ifdef(CONFIG_SOC_FAMILY_STM32 app PRIVATE src/audio_stm32.c)
 
 # Embed the playlist as flash data, generated at build time into the build
 # directory rather than committing ~6x larger generated headers. Each MOD
@@ -49,6 +58,13 @@ if(CONFIG_BOARD_XIAO_BLE)
         ELYSIUM.MOD
         MOBY_DRAGONSFUNK.MOD
         12TH.MOD
+    )
+# NUCLEO-L552ZE-Q: 512 KB of internal flash in total.
+elseif(CONFIG_BOARD_NUCLEO_L552ZE_Q)
+    set(MOD_FILES
+        AXEL_F.MOD
+        POPCORN1.MOD
+        ELYSIUM.MOD
     )
 endif()
 set(MOD_GEN_DIR ${CMAKE_CURRENT_BINARY_DIR}/mods)
