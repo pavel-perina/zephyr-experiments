@@ -1,0 +1,22 @@
+/*
+ * NUCLEO-L552ZE-Q: SHT40 on I2C1, Arduino-style pins on the Zio header:
+ * D14 = PB9 = SDA, D15 = PB8 = SCL, plus 3V3 (CN8 pin 7) and GND.
+ *
+ * The board definition doesn't enable any I2C bus, so this does. The
+ * pinctrl nodes from the HAL already set open-drain and the internal
+ * pull-ups (weak, ~40 kOhm); the SHT40 breakout's own pull-ups do the real
+ * work. No "timings" property needed: without a preset matching the bus
+ * clock, the driver computes the timing register itself (standard and
+ * fast mode only).
+ */
+&i2c1 {
+	pinctrl-0 = <&i2c1_scl_pb8 &i2c1_sda_pb9>;
+	pinctrl-names = "default";
+	status = "okay";
+
+	sht4x: sht4x@44 {
+		compatible = "sensirion,sht4x";
+		reg = <0x44>;
+		repeatability = <2>;
+	};
+};
