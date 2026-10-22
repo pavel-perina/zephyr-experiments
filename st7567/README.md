@@ -1,7 +1,14 @@
 Build software
 ```sh
-west build -p auto -b xiao_rp2040
+west build -p auto -b xiao_rp2040       # console on USB CDC ACM
+west build -p auto -b nucleo_l552ze_q   # console on ST-LINK VCP
 ```
+Board-specific config and devicetree are in `boards/<board>.conf|.overlay`.
+
+NUCLEO-L552ZE-Q wiring (Arduino header): SCK D13, MOSI D11, CS D10, DC D9, RESET D8.
+Flash with `west flash -r openocd`.
+
+![ST7567 on NUCLEO-L552ZE-Q](stm32_st7567.jxl)
 
 XIAO RP2040
 To enter boot mode on XIAO RP2040 press `reset` while holding `boot`.

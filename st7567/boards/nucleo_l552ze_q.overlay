@@ -1,0 +1,46 @@
+// NUCLEO-L552ZE-Q, ST7567 on the Arduino (Zio) header:
+//   SCK  D13 = PA5 (SPI1)       DC    D9 = PD15
+//   MOSI D11 = PA7 (SPI1)       RESET D8 = PF12
+//   CS   D10 = PD14 (GPIO)
+// The board has no arduino_spi label; spi1 is the SPI on D11-D13.
+// Console on LPUART1 = ST-LINK virtual COM port (board default).
+
+#include <zephyr/dt-bindings/gpio/arduino-header-r3.h>
+
+/ {
+    chosen {
+        zephyr,display = &st7567;
+    };
+
+    mipi_dbi {
+        compatible      = "zephyr,mipi-dbi-spi";
+        spi-dev         = <&spi1>;
+        dc-gpios        = <&arduino_header ARDUINO_HEADER_R3_D9 GPIO_ACTIVE_HIGH>;
+        reset-gpios     = <&arduino_header ARDUINO_HEADER_R3_D8 GPIO_ACTIVE_LOW>;
+        write-only;
+        #address-cells  = <1>;
+        #size-cells     = <0>;
+
+        st7567: st7567@0 {
+            compatible          = "sitronix,st7567";
+            mipi-max-frequency  = <20000000>;       // 20MHz
+            mipi-mode = "MIPI_DBI_MODE_SPI_4WIRE";
+            reg                 = <0>;              // Uses cs-gpios[0]
+            width               = <128>;
+            height              = <64>;
+            status              = "okay";
+            column-offset       = <0>;
+            line-offset         = <0>;
+            regulation-ratio    = <0x3>;            // 3bits
+            //segment-invdir;                         // flipX=True
+            com-invdir;                             // flipY=True
+            bias;
+        };
+    };
+};
+
+// Drop hardware NSS (PA4) from the board's pinctrl, CS is a GPIO on D10
+&spi1 {
+    pinctrl-0 = <&spi1_sck_pa5 &spi1_miso_pa6 &spi1_mosi_pa7>;
+    cs-gpios  = <&arduino_header ARDUINO_HEADER_R3_D10 GPIO_ACTIVE_LOW>;
+};
