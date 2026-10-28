@@ -16,6 +16,8 @@
 #include <zephyr/device.h>
 #include <zephyr/drivers/sensor.h>
 #include <zephyr/drivers/sensor/veml7700.h>
+#include <zephyr/shell/shell.h>
+#include <zephyr/sys/atomic.h>
 
 static const struct device *const veml7700 = DEVICE_DT_GET(DT_NODELABEL(veml7700));
 
@@ -90,6 +92,67 @@ static void print_milli(float lux)
 	printk("%u.%03u", m / 1000, m % 1000);
 }
 
+/*
+ * `als sweep`: measure the same light in every range, to compare them. The
+ * shell only sets a flag; the sweep runs in main() so the 1 Hz loop and the
+ * sweep never use the sensor at the same time. Keep the light steady.
+ */
+#define SWEEP_FETCHES 4
+
+static atomic_t sweep_req;
+
+static void sweep(void)
+{
+	printk("sweep: range, ALS counts of %d fetches, mean lux (corrected)\n", SWEEP_FETCHES);
+
+	for (int r = 0; r < ARRAY_SIZE(ranges); r++) {
+		uint32_t sum = 0;
+		bool sat = false;
+
+		set_range(r);
+		printk("%-10s", ranges[r].name);
+		for (int i = 0; i < SWEEP_FETCHES; i++) {
+			struct sensor_value als = {0};
+
+			if (sensor_sample_fetch(veml7700) == 0) {
+				sensor_channel_get(veml7700,
+						   (enum sensor_channel)SENSOR_CHAN_VEML7700_RAW_COUNTS,
+						   &als);
+			}
+			printk(" %5d", als.val1);
+			sum += als.val1;
+			sat |= als.val1 >= COUNTS_SAT;
+		}
+		if (sat) {
+			printk("  SATURATED\n");
+			continue;
+		}
+
+		float lux = (float)sum / SWEEP_FETCHES * ranges[r].res;
+
+		printk("  ");
+		print_milli(lux);
+		if (r <= RANGE_LOW_GAIN) {
+			printk(" (");
+			print_milli(correct_lux(lux));
+			printk(")");
+		}
+		printk("\n");
+	}
+}
+
+static int cmd_sweep(const struct shell *sh, size_t argc, char **argv)
+{
+	atomic_set(&sweep_req, 1);
+	shell_print(sh, "sweep starts after the current reading, ~8 s");
+	return 0;
+}
+
+SHELL_STATIC_SUBCMD_SET_CREATE(als_cmds,
+	SHELL_CMD(sweep, NULL, "Measure in every range (keep the light steady)", cmd_sweep),
+	SHELL_SUBCMD_SET_END);
+SHELL_CMD_REGISTER(als, &als_cmds, "VEML7700 ambient light", NULL);
+
 int main(void)
 {
 	if (!device_is_ready(veml7700)) {
@@ -103,6 +166,12 @@ int main(void)
 	set_range(r);
 
 	while (1) {
+		if (atomic_cas(&sweep_req, 1, 0)) {
+			sweep();
+			set_range(r);
+			next = k_uptime_get();
+		}
+
 		struct sensor_value als, white;
 		int err = sensor_sample_fetch(veml7700);
 
