@@ -4,3 +4,5 @@ build/
 xiao_rp2040_mplay/tools/.venv
 
 xiao_rp2040_mplay/tools/__pycache__
+
+veml7700/**/*.jsonl

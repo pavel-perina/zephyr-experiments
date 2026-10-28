@@ -1,6 +1,8 @@
 /*
- * VEML7700 ambient light, read once per second and printed to the console.
- * The sensor node (label veml7700) comes from boards/<board>.overlay.
+ * VEML7700 ambient light, read every 10 s, printed to the console and sent
+ * in a BLE beacon (see advertise() for the format; tools/ble_logger.py
+ * receives it). The sensor node (label veml7700) comes from
+ * boards/<board>.overlay.
  *
  * Auto-ranging and the non-linearity correction follow Vishay's application
  * note "Designing the VEML7700 Into an Application" (doc. 84323): start at
@@ -9,8 +11,8 @@
  * polynomial. Lux is computed here from the raw counts - the driver's own
  * lux value is whole lux only.
  *
- * The driver measures single-shot and waits twice the integration time, so
- * 400 ms is the longest integration time that fits in a 1 s period.
+ * The driver measures single-shot and waits twice the integration time;
+ * the longest range (400 ms) takes ~810 ms per fetch.
  */
 #include <zephyr/kernel.h>
 #include <zephyr/device.h>
@@ -18,6 +20,10 @@
 #include <zephyr/drivers/sensor/veml7700.h>
 #include <zephyr/shell/shell.h>
 #include <zephyr/sys/atomic.h>
+#include <zephyr/sys/byteorder.h>
+#include <zephyr/bluetooth/bluetooth.h>
+
+#define PERIOD_MS 10000
 
 static const struct device *const veml7700 = DEVICE_DT_GET(DT_NODELABEL(veml7700));
 
@@ -144,7 +150,7 @@ static void sweep(void)
 static int cmd_sweep(const struct shell *sh, size_t argc, char **argv)
 {
 	atomic_set(&sweep_req, 1);
-	shell_print(sh, "sweep starts after the current reading, ~8 s");
+	shell_print(sh, "sweep starts after the current period (up to 10 s), takes ~8 s");
 	return 0;
 }
 
@@ -153,11 +159,61 @@ SHELL_STATIC_SUBCMD_SET_CREATE(als_cmds,
 	SHELL_SUBCMD_SET_END);
 SHELL_CMD_REGISTER(als, &als_cmds, "VEML7700 ambient light", NULL);
 
+/*
+ * Beacon: non-connectable advertising every ~1 s, so each 10 s sample is
+ * sent ~10 times. Manufacturer data, little-endian:
+ *   0..1  company ID 0xFFFF (reserved for testing)
+ *   2     format version (1)
+ *   3..6  uptime of the sample [s] - unique per sample, the receiver
+ *         drops repeats by it
+ *   7..8  ALS counts
+ *   9..10 white counts
+ *   11    range index into ranges[] (0xFF: fetch failed)
+ */
+static uint8_t mfg[12] = {0xff, 0xff, 1};
+
+static const struct bt_data ad[] = {
+	BT_DATA_BYTES(BT_DATA_FLAGS, BT_LE_AD_NO_BREDR),
+	BT_DATA(BT_DATA_MANUFACTURER_DATA, mfg, sizeof(mfg)),
+	BT_DATA(BT_DATA_NAME_COMPLETE, CONFIG_BT_DEVICE_NAME, sizeof(CONFIG_BT_DEVICE_NAME) - 1),
+};
+
+static const struct bt_le_adv_param adv_param =
+	BT_LE_ADV_PARAM_INIT(BT_LE_ADV_OPT_USE_IDENTITY, BT_GAP_MS_TO_ADV_INTERVAL(1000),
+			     BT_GAP_MS_TO_ADV_INTERVAL(1024), NULL);
+
+static void advertise(uint32_t uptime, uint16_t als, uint16_t white, uint8_t range)
+{
+	static bool started;
+	int err;
+
+	sys_put_le32(uptime, &mfg[3]);
+	sys_put_le16(als, &mfg[7]);
+	sys_put_le16(white, &mfg[9]);
+	mfg[11] = range;
+
+	if (started) {
+		err = bt_le_adv_update_data(ad, ARRAY_SIZE(ad), NULL, 0);
+	} else {
+		err = bt_le_adv_start(&adv_param, ad, ARRAY_SIZE(ad), NULL, 0);
+		started = (err == 0);
+	}
+	if (err) {
+		printk("advertising failed: %d\n", err);
+	}
+}
+
 int main(void)
 {
 	if (!device_is_ready(veml7700)) {
 		printk("VEML7700 not ready - check wiring (D4 SDA, D5 SCL, 3V3, GND)\n");
 		return 0;
+	}
+
+	int err = bt_enable(NULL);
+
+	if (err) {
+		printk("Bluetooth init failed: %d\n", err);
 	}
 
 	int r = RANGE_START;
@@ -173,10 +229,12 @@ int main(void)
 		}
 
 		struct sensor_value als, white;
-		int err = sensor_sample_fetch(veml7700);
+		uint32_t uptime = k_uptime_get_32() / 1000;
 
+		err = sensor_sample_fetch(veml7700);
 		if (err != 0) {
-			printk("[%u s] VEML7700 error %d\n", k_uptime_get_32() / 1000, err);
+			printk("[%u s] VEML7700 error %d\n", uptime, err);
+			advertise(uptime, 0, 0, 0xff);
 			goto wait;
 		}
 
@@ -194,9 +252,11 @@ int main(void)
 			continue;
 		}
 
+		advertise(uptime, als.val1, white.val1, r);
+
 		float lux = als.val1 * ranges[r].res;
 
-		printk("[%u s] ", k_uptime_get_32() / 1000);
+		printk("[%u s] ", uptime);
 		if (r <= RANGE_LOW_GAIN) {
 			print_milli(correct_lux(lux));
 			printk(" lx (uncorrected ");
@@ -219,7 +279,7 @@ int main(void)
 		}
 
 wait:
-		next += 1000;
+		next += PERIOD_MS;
 		k_sleep(K_TIMEOUT_ABS_MS(next));
 	}
 

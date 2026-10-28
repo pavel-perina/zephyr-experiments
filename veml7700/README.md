@@ -1,6 +1,7 @@
 # VEML7700 ambient light
 
-Adafruit VEML7700 breakout, read once per second and printed to the console.
+Adafruit VEML7700 breakout, read every 10 s, printed to the console and
+sent in a BLE beacon. `tools/ble_logger.py` logs the beacon to a JSONL file.
 Wiring per board in `boards/<board>.overlay`.
 
 | Board | SDA | SCL | Console | Flash |
@@ -42,6 +43,34 @@ those gains and prints both values. Gain 1 and 2 are only used below
 
 Lux is computed in the app from the raw counts; the driver's own lux
 value is whole lux only.
+
+## BLE beacon and logger
+
+Non-connectable advertising every ~1 s, name `veml7700`, manufacturer data
+with company ID 0xFFFF (reserved for testing): format version, uptime of
+the sample [s], ALS and white counts, range index. Byte layout in
+`advertise()` in `src/main.c`. Each 10 s sample is sent ~10 times.
+
+```
+tools/ble_logger.py --dir ~/data      # Ctrl-C stops
+```
+
+It's a [uv](https://docs.astral.sh/uv/) script: bleak is declared inline and
+uv installs it into its cache on the first run (or `uv run
+tools/ble_logger.py`). On Linux bleak talks to BlueZ over D-Bus, so
+`bluetoothd` must be running; no root needed.
+
+Writes `<start>-veml7700-data.jsonl`, e.g.
+`2026-10-28_12-46-13-veml7700-data.jsonl`, one line per sample:
+
+```
+{"time": "2026-10-28T12:51:01.254+01:00", "uptime": 10, "als": 7991, "white": 19976, "range": 6, "gain": "2", "it_ms": 200, "rssi": -57}
+```
+
+`time` is the host clock at first reception, `uptime` the XIAO's when it
+measured (a reset shows as uptime going down). Missing samples show as
+gaps in `uptime`. The range table is in `RANGES` in the script; it must
+match `ranges[]` in `src/main.c`.
 
 ## Comparing ranges: `als sweep`
 
