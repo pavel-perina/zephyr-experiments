@@ -1,0 +1,15 @@
+/*
+ * XIAO BLE (nRF52840): Adafruit VEML7700 breakout on the XIAO I2C pins
+ * (D4 = SDA, D5 = SCL), 3V3, GND - or the STEMMA QT cable. The breakout
+ * has its own pull-ups. Fixed address 0x10.
+ *
+ * psm-mode 0 (default): power saving off, so the driver runs in single-shot
+ * mode - every sensor_sample_fetch() powers the sensor up, waits twice the
+ * integration time and shuts it down again.
+ */
+&xiao_i2c {
+	veml7700: veml7700@10 {
+		compatible = "vishay,veml7700";
+		reg = <0x10>;
+	};
+};
