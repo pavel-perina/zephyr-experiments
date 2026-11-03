@@ -24,7 +24,7 @@ esptool --port /dev/ttyACM0 --baud 921600 write-flash 0x1000 build/zephyr/zephyr
 # Raspberry Pi Pico (classic)
 west build -p -b rpi_pico
 # Build for Pico 2 without WiFi (append ``/w`)
-west build -p -b rpi_pico2/rp2350a/m33
+west build -p -b rpi_pico2/rp2350a/m33_0
 # On my notebook /dev/sda is a card reader
 udisksctl mount -b /dev/sdb1 && west flash -r uf2
 ```

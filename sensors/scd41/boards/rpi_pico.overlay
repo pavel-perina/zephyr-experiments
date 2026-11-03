@@ -1,4 +1,4 @@
-/* rpi_pico2_rp2350a_m33 -b rpi_pico2/rp2350a/m33 */
+/* rpi_pico2_rp2350a_m33_0 -b rpi_pico2/rp2350a/m33_0 */
 / {
     aliases {
         env-sensor = &scd41;

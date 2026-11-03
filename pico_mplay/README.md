@@ -79,7 +79,7 @@ that holds forever.
 Build (Pico 2, non-W - the /w variant is currently broken, see hello_pico's
 README):
 ```
-west build -p -b rpi_pico2/rp2350a/m33 . -S cdc-acm-console -- -DCONFIG_USB_DEVICE_INITIALIZE_AT_BOOT=y
+west build -p -b rpi_pico2/rp2350a/m33_0 . -S cdc-acm-console -- -DCONFIG_USB_DEVICE_INITIALIZE_AT_BOOT=y
 ```
 
 Build (original Pico 1 / RP2040):

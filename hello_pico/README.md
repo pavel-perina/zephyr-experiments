@@ -19,6 +19,6 @@ Ways to compile:
 
 However as of 2025-10-26 the command
    ```
-   west build -p always -b rpi_pico2/rp2350a/m33/w -S  cdc-acm-console -- -DCONFIG_USB_DEVICE_INITIALIZE_AT_BOOT=y
+   west build -p always -b rpi_pico2/rp2350a/m33_0/w -S  cdc-acm-console -- -DCONFIG_USB_DEVICE_INITIALIZE_AT_BOOT=y
    ```
    does not work with Raspberry Pi Pico 2 W

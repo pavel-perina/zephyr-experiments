@@ -1,3 +1,5 @@
+#include <zephyr/dt-bindings/display/panel.h>
+
 / {
     chosen {
         zephyr,display = &st7789;
@@ -48,7 +50,8 @@
             pvgam-param = [D0 08 11 08 0C 15 39 33 50 36 13 14 29 2D];
             nvgam-param = [D0 08 10 08 06 06 39 44 51 0B 16 14 2F 31];
             // TODO: te-on -> likely not supported by driver
-            colmod      = <5>; // 16bpp hicolor
+            /* Byte-swapped RGB565 (was CONFIG_ST7789V_BGR565 + colmod before Zephyr 4.5). */
+            pixel-format = <PANEL_PIXEL_FORMAT_RGB_565X>;
 
             porch-param = [0c 0c 00 33 33];
             lcm         = <0x2c>;

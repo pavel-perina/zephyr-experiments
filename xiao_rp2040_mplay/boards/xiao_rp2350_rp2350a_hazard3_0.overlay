@@ -4,9 +4,9 @@
  * RX = D7/GPIO1, 115200 8N1 - needs a 3.3 V USB-serial adapter) instead of
  * USB CDC: USB device mode hangs on Hazard3 in Zephyr 4.4.2 - even the
  * unmodified samples/subsys/usb/cdc_acm never enumerates, while the same
- * code works on the M33 cores. See boards/xiao_rp2350_rp2350a_hazard3.conf.
+ * code works on the M33 cores. See boards/xiao_rp2350_rp2350a_hazard3_0.conf.
  */
-#include "xiao_rp2350_rp2350a_m33.overlay"
+#include "xiao_rp2350_rp2350a_m33_0.overlay"
 
 / {
 	chosen {
